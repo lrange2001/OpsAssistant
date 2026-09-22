@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ForFreedom Assistant</title>
+<link rel="icon" href="data:,"><!-- 无 favicon 文件,占位避免每次加载 404 -->
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/css/vue-ssh.css">
+<link rel="stylesheet" href="/static/css/vue-keys.css">
+</head>
+<body data-uimode="coding">
+<div id="app">
+
+  <header id="topbar">
+    <div class="brand"><span>ForFreedom Assistant</span></div>
+    <div class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text">Connecting…</span></div>
+    <div class="spacer"></div>
+    <div class="chip btnlike" id="cc-chip" title="Current model (managed by ccswitch) — click for details">ccswitch</div>
+    <div class="chip btnlike" id="goal-chip" style="display:none" title="Session goal — click to view">goal</div>
+    <div class="chip btnlike" id="ssh-chip" style="display:none" title="SSH server terminal — click to show/hide the panel">ssh</div>
+    <div class="chip btnlike dev-only" id="ctx-chip" title="Context usage (estimate) — click to compact">ctx 0%</div>
+    <div class="chip btnlike" id="btn-cmdk" title="Command center (Cmd+K)">Cmd K</div>
+    <button class="icon-btn" id="btn-new" title="New chat (Cmd+N)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <div class="dd-wrap">
+      <button class="icon-btn" id="btn-history" title="History">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      </button>
+      <div class="dropdown hidden" id="history-dd">
+        <input class="dd-search" id="dd-search" placeholder="Search conversations…">
+        <div id="session-list"></div>
+      </div>
+    </div>
+    <button class="icon-btn" id="btn-settings" title="Settings (Cmd+,)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="7" cy="18" r="2"/></svg>
+    </button>
+    <button class="icon-btn txt-btn" id="btn-theme" title="Toggle theme (Cmd+Shift+L)">Light</button>
+  </header>
+
+  <div id="main">
+    <div id="main-col">
+      <div id="ssh-panel">
+        <div class="ssh-bar">
+          <div class="ssh-tabs" id="ssh-tabs"></div>
+          <select id="ssh-host-sel" class="sp-input" style="width:200px;flex-shrink:0" title="Open another terminal — manage hosts in Settings"><option value="">Connect to…</option></select>
+          <button class="mini-btn" id="ssh-reconn" style="margin:0" title="Kill and reconnect this terminal's host">Reconnect</button>
+          <button class="mini-btn" id="ssh-master-close" style="margin:0" title="Close this terminal and its shared authenticated link">Close link</button>
+          <button class="mini-btn" id="ssh-collapse" style="margin:0" title="Hide the panel (terminals keep running)">Hide</button>
+        </div>
+        <div id="ssh-screen" title="Click here, then type"></div>
+        <input id="ssh-hidden" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="ssh-resize" title="Drag to resize"></div>
+    <div id="chat-col">
+    <div id="chat">
+      <div id="welcome">
+        <h2>ForFreedom Assistant</h2>
+        <div>Model from ccswitch · Runs commands &amp; edits files on your Mac</div>
+        <div class="cap">
+          <b>Shell &amp; tools</b> — run commands, search code, fetch pages, dispatch subagents<br>
+          <b>Files</b> — read, write and precisely edit; a checkpoint is saved before every change<br>
+          <b>Permissions</b> — plan / build / edit / yolo modes; approve risky steps or let it run<br>
+          <b>Side pane</b> — live Terminal, Files and Git (Cmd+J); automations &amp; usage in Settings<br>
+          <b>Servers</b> — SSH terminals beside the chat (/ssh, several tabs); /vvv attaches the current one's log
+        </div>
+        <div class="sugs" id="sug-box"></div>
+      </div>
+      <div id="messages"></div>
+    </div>
+      <div id="status-fab" style="display:none"></div>
+      <div id="status-pop"></div>
+    </div>
+    </div>
+
+    <aside id="sidepane">
+      <div class="sp-inner">
+        <div class="sp-tabs">
+          <button class="tab2 active" data-spt="term">Terminal</button>
+          <button class="tab2" data-spt="files">Files</button>
+          <button class="tab2 dev-only" data-spt="git">Git</button>
+          <button class="tab2" data-spt="jobs">Jobs</button>
+          <button class="sp-x" id="sp-close" title="Close pane">x</button>
+        </div>
+        <div class="sp-body" data-spb="term">
+          <div id="term-screen" title="Click here, then type"></div>
+          <input id="term-hidden" autocomplete="off" spellcheck="false">
+          <div class="git-commit-row" style="margin-top:8px">
+            <input class="sp-input" id="term-cmd" placeholder="run in background…" spellcheck="false">
+            <button class="mini-btn" id="term-bg-run" style="margin:0">Run</button>
+            <button class="mini-btn" id="term-reset" style="margin:0" title="Kill and restart the shell">Reset</button>
+          </div>
+        </div>
+        <div class="sp-body" data-spb="files" style="display:none">
+          <div class="git-commit-row">
+            <button class="mini-btn" id="fs-up" style="margin:0">Up</button>
+            <span class="mono" id="fs-path" style="font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+            <button class="mini-btn" id="fs-refresh" style="margin:0">Refresh</button>
+          </div>
+          <div id="fs-list"></div>
+          <div id="fs-view"></div>
+        </div>
+        <div class="sp-body" data-spb="git" style="display:none">
+          <div class="git-commit-row">
+            <button class="mini-btn" id="git-refresh" style="margin:0">Refresh</button>
+            <span class="mono" id="git-branch" style="font-size:11.5px;color:var(--accent)" title="Click to switch branch"></span>
+            <span id="git-ab" class="mono"></span>
+            <span style="flex:1"></span>
+            <button class="mini-btn" id="git-push" style="margin:0" title="Push current branch to the remote">Push</button>
+          </div>
+          <div id="git-branch-dd" style="display:none"></div>
+          <div id="git-changes"></div>
+          <div class="git-commit-row" style="margin-top:8px">
+            <input class="sp-input" id="git-msg" placeholder="Commit message (empty to AI-generate)" spellcheck="false">
+            <button class="mini-btn primary" id="git-commit" style="margin:0">Commit</button>
+          </div>
+          <div class="hint-text" style="margin:-2px 0 4px"><a id="git-ai-msg" style="cursor:pointer">Generate with AI</a> — fills the message; you confirm the commit</div>
+          <button class="mini-btn" id="git-diff">View diff</button>
+          <div id="git-diff-view"></div>
+          <div id="git-log"></div>
+        </div>
+        <div class="sp-body" data-spb="jobs" style="display:none">
+          <div class="git-commit-row">
+            <button class="mini-btn" id="jobs-refresh" style="margin:0">Refresh</button>
+            <span class="hint-text" id="jobs-hint" style="margin:0"></span>
+          </div>
+          <div id="jobs-list"></div>
+          <div id="job-view"></div>
+        </div>
+      </div>
+    </aside>
+
+    <div id="findbar">
+      <input id="find-q" placeholder="Find in conversation…">
+      <span class="cnt" id="find-cnt">0/0</span>
+      <button id="find-prev" title="Previous (Shift+Enter)">^</button>
+      <button id="find-next" title="Next (Enter)">v</button>
+      <button id="find-close" title="Close (Esc)">x</button>
+    </div>
+
+    <div class="chat-float">
+      <div class="qnav" id="qnav"><button id="q-prev" title="Previous question">‹</button><span id="q-cnt">1/1</span><button id="q-next" title="Next question">›</button></div>
+      <button id="btn-scrollbottom" title="Scroll to bottom">v</button>
+    </div>
+  </div>
+
+  <div id="inputbar">
+    <div id="error-slot"></div>
+    <div class="cwd-line"><span class="cwd-label">dir</span><input id="cwd-input" class="cwd-input" spellcheck="false" placeholder="~/project" title="Working directory — commands & file operations run here"></div>
+    <div class="queued-bar" id="queued-bar" style="display:none"></div>
+    <div class="attach-bar" id="attach-bar" style="display:none"></div>
+    <div class="queued-bar" id="skill-bar" style="display:none"></div>
+    <div class="queued-bar" id="quote-bar" style="display:none"></div>
+    <div class="input-box" id="input-box">
+      <button class="icon-btn" id="btn-attach" title="Attach images (or paste / drag)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.5l-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2"/></svg>
+      </button>
+      <input type="file" id="file-input" accept="image/*" multiple style="display:none">
+      <textarea id="input" rows="1" placeholder="Message ForFreedom…"></textarea>
+      <button id="btn-send">Send</button>
+    </div>
+    <div class="input-hint">Enter send / queue · Esc stop · / commands · @ files · $ skills · /vvv terminal log <span id="usage-ring" style="display:none" title=""></span></div>
+  </div>
+</div>
+
+<!-- 设置弹窗 -->
+<div id="overlay"></div>
+<aside id="drawer">
+  <div class="drawer-head"><span>Settings</span><button id="drawer-close" title="Close">x</button></div>
+  <div class="tabbar" id="settings-tabs">
+    <button class="tab active" data-tab="gen">生成参数</button>
+    <button class="tab" data-tab="look">外观</button>
+    <button class="tab" data-tab="perm">工具与权限</button>
+    <button class="tab" data-tab="agents">子代理</button>
+    <button class="tab" data-tab="memory">记忆</button>
+    <button class="tab" data-tab="cmds">命令</button>
+    <button class="tab" data-tab="ssh">连接</button>
+    <button class="tab" data-tab="auto">定时任务</button>
+    <button class="tab" data-tab="usage">用量统计</button>
+    <button class="tab" data-tab="data">数据</button>
+    <button class="tab" data-tab="skills">技能</button>
+    <button class="tab" data-tab="mcp">插件 MCP</button>
+    <button class="tab" data-tab="keys">快捷键</button>
+  </div>
+  <div class="drawer-body">
+    <section class="set-page active" data-page="gen">
+      <div class="set-card">
+        <h3>生成参数</h3>
+        <label class="field">系统提示词
+          <textarea id="sys-prompt" rows="6" placeholder="告诉模型它是谁、该怎么做…"></textarea>
+        </label>
+        <div class="slider-row" style="margin-top:10px"><div class="lab"><span>最大生成长度</span><b id="v-maxtok"></b></div>
+          <input type="range" id="maxtok" min="256" max="65536" step="256"></div>
+        <div class="hint-text" style="margin:-4px 0 6px">ccswitch 环境变量 CLAUDE_CODE_MAX_OUTPUT_TOKENS(或 ANTHROPIC_MAX_TOKENS)存在时优先生效,忽略此滑杆。</div>
+        <div class="slider-row"><div class="lab"><span>最大工具轮数</span><b id="v-rounds"></b></div>
+          <input type="range" id="rounds" min="1" max="64" step="1"></div>
+        <div class="hint-text" style="margin:-4px 0 6px">默认 32;上下文耗尽是天然上限,64 顶格仅为防死循环兜底。</div>
+        <label class="switch"><input type="checkbox" id="think-on" checked> 启用深度思考
+          <span class="hint">回答前先推理,思考过程折叠展示。快捷键 Ctrl+T</span></label>
+        <div class="hint-text" style="margin-top:10px">采样(温度 / Top-P / Top-K)不在应用内设置:本地模型按 llama-server 启动参数,云端模型用供应商默认,请求不携带采样参数。上下文窗口自动跟随当前模型(本地探测 llama-server,云端按模型名识别),顶栏 ctx 徽章按它估算。</div>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="look">
+      <div class="set-card">
+        <h3>外观</h3>
+        <div class="radio-row" id="theme-radios">
+          <label data-t="dark" class="on"><input type="radio" name="th" checked> 深色(纯黑)</label>
+          <label data-t="light"><input type="radio" name="th"> 浅色</label>
+        </div>
+        <div class="slider-row" style="margin-top:12px"><div class="lab"><span>界面字号</span><b id="v-fsui">15px</b></div>
+          <input type="range" id="fs-ui" min="13" max="18" step="1"></div>
+        <div class="slider-row"><div class="lab"><span>代码字号</span><b id="v-fscode">13px</b></div>
+          <input type="range" id="fs-code" min="11" max="15" step="1"></div>
+      </div>
+      <div class="set-card">
+        <h3>界面模式</h3>
+        <div class="radio-row" id="uimode-radios">
+          <label data-m="coding" class="on"><input type="radio" name="um" checked> Coding(开发全功能)</label>
+          <label data-m="office"><input type="radio" name="um"> Office(精简,隐藏 Git/终端等开发面板)</label>
+        </div>
+        <div class="hint-text">快捷键 Cmd+Shift+U 切换;Office 模式隐藏右侧 Git 标签、上下文用量等开发向内容。</div>
+      </div>
+      <div class="set-card">
+        <h3>运行中输入</h3>
+        <div class="radio-row" id="busy-radios"></div>
+        <div class="hint-text" id="busy-desc"></div>
+      </div>
+      <div class="set-card">
+        <h3>系统通知</h3>
+        <label class="switch" style="margin-top:0"><input type="checkbox" id="notify-on" checked> 回复完成 / 出错 / 等待确认时通知
+          <span class="hint">仅当窗口不在前台时发送;点通知回到窗口</span></label>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="perm">
+      <div class="set-card">
+        <h3>工具与权限</h3>
+        <label class="switch" style="margin-top:0"><input type="checkbox" id="tools-on" checked> 启用工具调用
+          <span class="hint">允许模型执行命令 / 读写文件 / 派发子代理</span></label>
+        <h3 style="margin-top:14px">权限模式</h3>
+        <div class="radio-row" id="mode-radios"></div>
+        <div class="hint-text" id="mode-desc"></div>
+        <div class="hint-text">模式也随时可切:按 Ctrl+Shift+M 循环或用 /mode 命令;每会话独立记忆。</div>
+      </div>
+      <div class="set-card">
+        <h3>允许规则(命中即自动执行)</h3>
+        <div id="allow-rules"></div>
+        <button class="mini-btn" id="btn-add-allow">添加允许规则</button>
+        <div class="hint-text">command 按命令主键匹配(如 git push);command_prefix 按前缀;tool 按工具名。</div>
+      </div>
+      <div class="set-card">
+        <h3>拒绝规则(命中一律禁止)</h3>
+        <div id="deny-rules"></div>
+        <button class="mini-btn" id="btn-add-deny">添加拒绝规则</button>
+        <button class="mini-btn primary" id="btn-save-rules" style="margin-left:8px">保存权限规则</button>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="agents">
+      <div class="set-card">
+        <h3>子代理(task 工具可指定)</h3>
+        <div id="agents-list"></div>
+      </div>
+      <div class="set-card">
+        <h3>新建子代理</h3>
+        <label class="field">名称(英文标识,如 code-reviewer)
+          <input class="sp-input" id="ag-name" style="width:100%" spellcheck="false"></label>
+        <label class="field">描述(一句话,供模型选择)
+          <input class="sp-input" id="ag-desc" style="width:100%" spellcheck="false"></label>
+        <label class="field">系统提示词
+          <textarea id="ag-prompt" rows="5" placeholder="你是一个……的子代理。收到任务后……"></textarea></label>
+        <button class="mini-btn primary" id="btn-save-agent">保存子代理</button>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="memory">
+      <div class="set-card">
+        <h3>记忆(跨会话持久;索引注入每回合,模型按需读取具体文件)</h3>
+        <div id="mem-list"></div>
+      </div>
+      <div class="set-card">
+        <h3 id="mem-form-title">新建记忆</h3>
+        <label class="field">名称(英文标识,如 release-notes;MEMORY.md 为索引)
+          <input class="sp-input" id="mem-name" style="width:100%" spellcheck="false"></label>
+        <label class="field">全文(frontmatter + 正文)
+          <textarea id="mem-body" rows="10" spellcheck="false" placeholder="---
+name: release-notes
+description: 一句话描述,供索引与检索
+---
+
+正文内容"></textarea></label>
+        <button class="mini-btn primary" id="btn-save-mem">保存记忆</button>
+        <button class="mini-btn" id="btn-del-mem">删除当前</button>
+        <div class="hint-text">新建记忆后记得在 MEMORY.md 索引里加一行;保存后下回合生效。模型也会自动沉淀重要事实到本目录。</div>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="cmds">
+      <div class="set-card">
+        <h3>自定义斜杠命令(/ 面板与 /help 可见,发送时展开为提示词发给模型)</h3>
+        <div id="cmds-list"></div>
+      </div>
+      <div class="set-card">
+        <h3 id="cmds-form-title">新建命令</h3>
+        <label class="field">名称(英文标识,可用 / 分组,如 deploy/prod)
+          <input class="sp-input" id="cmd-name" style="width:100%" spellcheck="false" placeholder="review"></label>
+        <label class="field">描述(/ 面板里显示的一句话)
+          <input class="sp-input" id="cmd-desc" style="width:100%" spellcheck="false"></label>
+        <label class="field">参数提示(如 [文件名])
+          <input class="sp-input" id="cmd-args" style="width:100%" spellcheck="false"></label>
+        <label class="field">提示词($ARGUMENTS = 全部参数原样;$1 $2 = 按引号/空格拆分;都没写时参数附在末尾)
+          <textarea id="cmd-prompt" rows="6" placeholder="审查 $1 文件的改动,给出具体意见。"></textarea></label>
+        <button class="mini-btn primary" id="btn-save-cmd">保存命令</button>
+        <button class="mini-btn" id="btn-cancel-cmd" style="display:none">取消编辑</button>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="ssh">
+      <div id="vue-ssh-conn"></div>
+      <div id="vue-ssh-keys"></div>
+    </section>
+
+    <section class="set-page" data-page="auto">
+      <div class="set-card">
+        <h3>定时任务(本地时区,无人值守运行)</h3>
+        <div id="autos-list"></div>
+      </div>
+      <div class="set-card">
+        <h3>新建定时任务</h3>
+        <label class="field">标题 <input class="sp-input" id="au-title" style="width:100%"></label>
+        <label class="field">提示词(要做什么;任务在无人值守下自动执行,需确认的操作会被跳过)
+          <textarea id="au-prompt" rows="3" placeholder="例:检查 ~/project 的 git 状态,如果有未提交的改动,总结改动内容。"></textarea></label>
+        <label class="field">工作目录 <input class="sp-input" id="au-cwd" style="width:100%" placeholder="~" spellcheck="false"></label>
+        <div class="radio-row" id="au-units">
+          <label data-u="minute"><input type="radio" name="auu"> 每分钟</label>
+          <label data-u="hourly" class="on"><input type="radio" name="auu" checked> 每小时</label>
+          <label data-u="daily"><input type="radio" name="auu"> 每天</label>
+          <label data-u="weekly"><input type="radio" name="auu"> 每周</label>
+          <label data-u="monthly"><input type="radio" name="auu"> 每月</label>
+        </div>
+        <div class="slider-row"><div class="lab"><span>间隔(每 N 个单位)</span><b id="v-au-int">1</b></div>
+          <input type="range" id="au-interval" min="1" max="30" step="1" value="1"></div>
+        <div class="rule-row" style="margin:8px 0">
+          <span style="font-size:12px;color:var(--muted)">时刻</span>
+          <input id="au-hour" type="number" min="0" max="23" value="9" style="width:58px">
+          <span style="color:var(--muted)">:</span>
+          <input id="au-minute" type="number" min="0" max="59" value="0" style="width:58px">
+          <span id="au-day-wrap" style="font-size:12px;color:var(--muted);display:none"> 每月 </span>
+          <input id="au-day" type="number" min="1" max="31" value="1" style="width:58px;display:none">
+        </div>
+        <div class="rule-row" id="au-weekdays" style="display:none;flex-wrap:wrap;gap:4px"></div>
+        <label class="switch"><input type="checkbox" id="au-recurring" checked> 循环执行
+          <span class="hint">关闭后为一次性任务(跑完自动停用)</span></label>
+        <button class="mini-btn primary" id="btn-save-auto">创建任务</button>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="usage">
+      <div class="set-card">
+        <h3>用量统计</h3>
+        <div id="usage-box">打开本页时加载…</div>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="data">
+      <div class="set-card">
+        <h3>数据位置</h3>
+        <div class="rule-row">
+          <span class="mono" id="datadir-path" style="flex:1;min-width:0;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">加载中…</span>
+          <button class="mini-btn" id="btn-open-datadir" style="margin:0" title="在访达中打开数据目录">打开目录</button>
+        </div>
+        <div class="hint-text" id="datadir-note" style="margin:2px 0 10px"></div>
+        <div class="rule-row">
+          <input class="sp-input" id="datadir-new" placeholder="新位置,如 ~/ForFreedomData" spellcheck="false" style="flex:1">
+          <button class="mini-btn primary" id="btn-apply-datadir" style="margin:0">应用并迁移</button>
+        </div>
+        <div class="hint-text" style="margin-top:8px">改位置会把现有数据(配置 / 检查点 / 技能 / 子代理 / 命令 / 记忆 / 定时任务 / 用量 / MCP)整体搬到新位置,重启后生效。</div>
+        <div class="hint-text">聊天记录存在应用内浏览器存储,不随本目录迁移。</div>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="skills">
+      <div class="set-card">
+        <h3>技能 Skills</h3>
+        <div id="skills-editor"></div>
+        <button class="mini-btn" id="btn-open-skills">打开技能目录</button>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="mcp">
+      <div class="set-card">
+        <h3>插件 MCP</h3>
+        <div id="mcp-status"></div>
+        <textarea id="mcp-json" rows="8" spellcheck="false" placeholder='{"time": {"command": "uvx", "args": ["mcp-server-time"]}}'></textarea>
+        <button class="mini-btn primary" id="btn-save-mcp">保存并重连插件</button>
+      </div>
+    </section>
+
+    <section class="set-page" data-page="keys">
+      <div class="set-card">
+        <h3>快捷键</h3>
+        <div class="keys-bar">
+          <input class="sp-input" id="keys-q" placeholder="搜索命令或按键…" spellcheck="false">
+          <button class="mini-btn" id="btn-keys-capture" title="按下要查找的组合键">按组合键搜索</button>
+          <button class="mini-btn" id="btn-keys-reset">全部恢复默认</button>
+        </div>
+        <div id="keys-list"></div>
+        <div class="hint-text" style="margin-top:8px">点击键位改绑:录制新组合(Esc 取消,Backspace 恢复默认);与其他命令冲突可「仍要绑定」接管;垃圾桶清空为「未设置」;绿色键帽 = 已自定义。输入框内固定键不可改:Enter 发送 / Shift+Enter 换行 / Esc 停止与关面板 / 空输入 ↑↓ 翻历史 / @ $ 触发补全。</div>
+      </div>
+    </section>
+  </div>
+  <div class="drawer-foot">
+    <span class="foot-note">设置即时生效</span>
+    <button class="danger-btn" id="btn-clear">清空当前对话</button>
+  </div>
+</aside>
+
+<!-- 命令中心(⌘K) -->
+<div id="cmdk">
+  <div class="box">
+    <input id="cmdk-q" placeholder="Type a command, action or conversation…" spellcheck="false">
+    <div class="list" id="cmdk-list"></div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<button id="quote-float" title="Quote selection to input">Quote</button>
+<div id="send-confirm" style="display:none">
+  <div class="sc-card" role="dialog" aria-label="Send message">
+    <div class="sc-title">Send message?</div>
+    <div class="sc-tx"></div>
+    <div class="sc-desc"></div>
+    <div class="sc-acts">
+      <button class="sc-clear">Clear queue &amp; send</button>
+      <button class="sc-keep">Keep queue &amp; send</button>
+      <button class="sc-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="git-push-dlg">
+  <div class="sc-card" role="dialog" aria-label="Push changes">
+    <div class="sc-title">Push changes</div>
+    <div class="gp-row"><span class="k">Branch</span><span class="v" id="gp-branch"></span></div>
+    <div class="gp-row"><span class="k">Upstream</span><span class="v" id="gp-up"></span></div>
+    <div class="gp-row"><span class="k">Sync</span><span class="v" id="gp-sync"></span></div>
+    <div class="hint-text" id="gp-note" style="margin:2px 0 0"></div>
+    <div class="gp-err" id="gp-err" style="display:none"><pre id="gp-err-tx"></pre></div>
+    <div class="sc-acts">
+      <button class="sc-keep" id="gp-go">Push</button>
+      <button id="gp-cancel">Cancel</button>
+      <button class="sc-copy" id="gp-copy" style="display:none">Copy error</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/js/00-util.js"></script>
+<script src="/static/js/10-sessions-messages.js"></script>
+<script src="/static/js/20-timeline.js"></script>
+<script src="/static/js/30-composer.js"></script>
+<script src="/static/js/40-stream.js"></script>
+<script src="/static/js/50-compact-checkpoint.js"></script>
+<script src="/static/js/60-command-find.js"></script>
+<script src="/static/js/70-term.js"></script>
+<script src="/static/js/80-ssh.js"></script>
+<script src="/static/js/85-files-git.js"></script>
+<script src="/static/js/90-overlay-config.js"></script>
+<script src="/static/js/95-settings.js"></script>
+<script src="/static/js/96-hotkeys.js"></script>
+<script src="/static/js/97-vue-ssh.js"></script>
+<script src="/static/js/98-vue-keys.js"></script>
+<script src="/static/js/99-boot.js"></script>
+</body>
+</html>
+

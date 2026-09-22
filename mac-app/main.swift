@@ -1,0 +1,241 @@
+// ForFreedom Assistant —— Mac 应用壳(完全自包含)
+// server.py 与 index.html 内嵌在 bundle 的 Resources/app/ 下,运行期不依赖任何外部源码;
+// 用户数据默认在 ~/ForFreedom(设置页可改位置;位置指针存 ~/Library/Application Support/ForFreedomAssistant/datadir.txt,
+// 旧位置数据由 server.py 首次启动自动整体迁移,app 不注入 FF_DATA_DIR、不参与迁移)。
+// 模型完全跟随 ccswitch(cc-switch):供应商/密钥/模型名实时读取 ~/.claude/settings.json。
+import Cocoa
+import WebKit
+import UserNotifications
+
+let appURL = URL(string: "http://127.0.0.1:8090/")!
+
+// 内嵌后端(只认 bundle 内副本)
+var serverPyPath: String {
+    (Bundle.main.resourceURL?.path ?? ".") + "/app/server.py"
+}
+
+/// TCP 端口是否可连(判断服务是否已在跑)
+func portOpen(_ port: Int) -> Bool {
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = UInt16(port).bigEndian
+    addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    let r = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    return r == 0
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate {
+    var window: NSWindow!
+    var webView: WKWebView!
+    var children: [Process] = []
+
+    func applicationDidFinishLaunching(_ note: Notification) {
+        buildMenu()
+
+        // 系统通知:完成/出错/等待确认时前端经 webkit.messageHandlers.notify 发来
+        let unc = UNUserNotificationCenter.current()
+        unc.delegate = self
+        unc.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
+        // WebUI 代理(内嵌 server.py)不在跑则拉起;数据目录解析/旧数据迁移全部由 server.py 自己负责
+        if !portOpen(8090) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-lc", "exec python3 '\(serverPyPath)' >> /tmp/juno-server.log 2>&1"]
+            do { try p.run(); children.append(p) } catch { NSLog("server.py 启动失败: \(error)") }
+        }
+
+        makeWindow()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func makeWindow() {
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 1160, height: 780))
+        let cfg = WKWebViewConfiguration()
+        let ucc = WKUserContentController()
+        ucc.add(self, name: "notify")
+        cfg.userContentController = ucc
+        webView = WKWebView(frame: content.bounds, configuration: cfg)
+        webView.autoresizingMask = [.width, .height]
+        webView.navigationDelegate = self
+        webView.underPageBackgroundColor = .black
+        content.addSubview(webView)
+
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1160, height: 780),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered, defer: false)
+        window.title = "ForFreedom Assistant"
+        window.contentMinSize = NSSize(width: 680, height: 480)
+        window.backgroundColor = .black
+        window.isReleasedWhenClosed = false  // 关窗只藏不销毁,点 Dock 图标可重开(见 applicationShouldHandleReopen)
+        window.center()
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+
+        loadWhenReady()
+    }
+
+    /// 等 8090 就绪(最多 15 秒)再加载页面
+    func loadWhenReady() {
+        DispatchQueue.global().async { [self] in
+            for _ in 0..<50 where !portOpen(8090) {
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+            DispatchQueue.main.async { self.webView.load(URLRequest(url: appURL)) }
+        }
+    }
+
+    /// 让页面执行一段 JS(菜单动作直通 WebUI)
+    func pageJS(_ js: String) {
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    @objc func newTask() { pageJS("document.getElementById('btn-new').click()") }
+    @objc func openSettings() { pageJS("document.getElementById('btn-settings').click()") }
+    @objc func toggleTheme() { pageJS("document.getElementById('btn-theme').click()") }
+    @objc func openHistory() { pageJS("document.getElementById('btn-history').click()") }
+
+    var zoomStep: CGFloat = 0 {  // pageZoom 增量,0 为 100%
+        didSet { webView.pageZoom = 1 + zoomStep }
+    }
+    @objc func zoomIn() { zoomStep = min(zoomStep + 0.1, 1.0) }
+    @objc func zoomOut() { zoomStep = max(zoomStep - 0.1, -0.5) }
+    @objc func actualSize() { zoomStep = 0 }
+
+    func buildMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem(title: "ForFreedom Assistant", action: nil, keyEquivalent: "")
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About ForFreedom Assistant",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Hide", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: nil, keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        hideOthers.action = #selector(NSApplication.hideOtherApplications(_:))
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit ForFreedom Assistant",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+        let fileMenu = NSMenu()
+        fileMenu.addItem(withTitle: "New Task", action: #selector(newTask), keyEquivalent: "n")
+        fileMenu.addItem(withTitle: "History", action: #selector(openHistory), keyEquivalent: "h")
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose), keyEquivalent: "w")
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu()
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: nil, keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        redo.action = Selector(("redo:"))
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+        let viewMenu = NSMenu()
+        viewMenu.addItem(withTitle: "Toggle Dark/Light Theme", action: #selector(toggleTheme), keyEquivalent: "l")
+        viewMenu.addItem(NSMenuItem.separator())
+        viewMenu.addItem(withTitle: "Zoom In", action: #selector(zoomIn), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "Zoom Out", action: #selector(zoomOut), keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "Actual Size", action: #selector(actualSize), keyEquivalent: "0")
+        viewMenu.addItem(NSMenuItem.separator())
+        let fsItem = viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen), keyEquivalent: "f")
+        fsItem.keyEquivalentModifierMask = [.command, .control]
+        viewItem.submenu = viewMenu
+        mainMenu.addItem(viewItem)
+
+        let winItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        let winMenu = NSMenu()
+        winMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize), keyEquivalent: "m")
+        winMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom), keyEquivalent: "")
+        winMenu.addItem(NSMenuItem.separator())
+        winMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront), keyEquivalent: "")
+        winItem.submenu = winMenu
+        mainMenu.addItem(winItem)
+
+        NSApplication.shared.mainMenu = mainMenu
+    }
+
+    // 前端通知桥:index.html 调 webkit.messageHandlers.notify.postMessage({title, body})
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "notify", let obj = message.body as? [String: Any] else { return }
+        let content = UNMutableNotificationContent()
+        content.title = (obj["title"] as? String) ?? "ForFreedom Assistant"
+        content.body = (obj["body"] as? String) ?? ""
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
+    // 点通知回到主窗口
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        await MainActor.run {
+            if window != nil {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
+
+    // app 在前台时不重复弹横幅(前端已按后台判断,双保险)
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        []
+    }
+
+    // 外部链接(target=_blank)交给系统浏览器打开
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    // 点 Dock 图标(或对运行中的 app 再执行 open -a)时重开主窗口
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag && window != nil {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        return true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for p in children where p.isRunning {
+            p.terminate()
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+        return .terminateNow
+    }
+}
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.regular)
+app.run()

@@ -1,0 +1,21 @@
+# 运行时数据只可能出现在仓库根,根锚定防止误伤 backend/ 包内同名模块目录
+/agents/
+/checkpoints/
+/commands/
+/memory/
+/skills/
+/config.json
+/usage.jsonl
+__pycache__/
+.DS_Store
+**/.DS_Store
+mac-app/ForFreedomAssistant.app/
+mac-app/icon.iconset/
+mac-app/icon_1024.png
+tests/node_modules
+.claude/
+
+# 开源整理:开发文档与 docs 顶层方案文档仅本地保留,不随仓库分发
+# (docs/screenshots/ 与 docs/manual/ 随仓库分发,不受影响)
+开发文档.md
+docs/*.md

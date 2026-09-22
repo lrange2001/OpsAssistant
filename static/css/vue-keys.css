@@ -1,0 +1,56 @@
+/* SSH 密钥管理 Vue 组件样式(FE-KEYS;沿用 style.css 的 :root 变量与 set-card/mini-btn/sp-input/hint-text,仅补组件特有样式) */
+
+#vue-ssh-keys .set-card { display: flex; flex-direction: column; }
+
+/* ---- 空态/加载/暂不可用 ---- */
+.vk-empty {
+  color: var(--muted); font-size: 12.5px; padding: 10px 2px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.vk-empty .mini-btn { margin: 0; padding: 4px 12px; font-size: 11.5px; }
+
+/* ---- 密钥列表 ---- */
+.vk-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 2px; border-top: 1px solid var(--border);
+}
+.vk-row:first-child { border-top: none; }
+.vk-info { flex: 1; min-width: 0; }
+
+.vk-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.vk-name {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vk-type {
+  font-size: 11px; color: var(--muted); flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px;
+}
+.vk-nopriv, .vk-warn { font-size: 10.5px; flex-shrink: 0; border-radius: 5px; padding: 2px 6px; }
+.vk-nopriv { color: #fbbf24; border: 1px solid rgba(251, 191, 36, .45); cursor: help; } /* 无私钥标记 */
+.vk-warn { color: var(--danger); border: 1px solid rgba(248, 113, 113, .4); cursor: help; } /* 单把密钥异常(key.error) */
+
+.vk-sub { display: flex; align-items: baseline; gap: 10px; margin-top: 3px; min-width: 0; }
+.vk-fp { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.vk-comment {
+  flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.vk-acts { display: flex; gap: 6px; flex-shrink: 0; }
+.vk-acts .mini-btn { margin: 0; padding: 4px 10px; font-size: 11.5px; }
+.vk-acts .mini-btn:disabled { opacity: .5; cursor: default; }
+.vk-del:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+
+/* ---- 生成区 ---- */
+.vk-gen { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.vk-gen .sp-input { flex: 1; min-width: 150px; width: auto; }
+.vk-gen .vk-type-sel { flex: 0 0 auto; font-family: inherit; } /* select 不用等宽字体 */
+.vk-gen .mini-btn { margin: 0; }
+.vk-err { color: var(--danger); font-size: 12px; margin-top: 6px; }
+
+@media (max-width: 640px) {
+  .vk-row { flex-wrap: wrap; }
+  .vk-acts { width: 100%; justify-content: flex-end; }
+  .vk-name { max-width: 100%; }
+}

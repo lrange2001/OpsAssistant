@@ -1,0 +1,124 @@
+/* SSH 连接页 Vue 组件样式(FE-CONN 重做):分组 chips 筛选 + 主机列表卡片化 + 弹出式编辑卡 + 轻量分组管理。
+   沿用现有视觉语言(默认纯黑主题 + data-theme="light" 浅色),变量参考 static/style.css 的 :root;
+   卡片/输入/按钮基础样式复用 .set-card / .field / .sp-input / .mini-btn / .hint-text。
+   DOM 顺序为 分组管理 → 编辑卡 → 主机卡,这里用 flex order 排成 编辑卡 → 主机卡 → 分组管理
+   (DOM 顺序照顾 tests/ssh2-ui-test.mjs 的按钮启发式定位,视觉顺序按设计稿)。 */
+
+/* ---- 卡片视觉排序:编辑卡(展开时在最上)→ 主机卡 → 分组管理 ---- */
+#vue-ssh-conn { display: flex; flex-direction: column; }
+#vue-ssh-conn .ssh-edit-card { order: 1; }
+#vue-ssh-conn .ssh-hosts-card { order: 2; }
+#vue-ssh-conn .ssh-groups-card { order: 3; }
+
+/* ---- 卡头:标题 + 右侧主操作(添加主机) ---- */
+#vue-ssh-conn .ssh-card-head { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
+#vue-ssh-conn .ssh-card-head h3 { margin: 0; flex: 1; min-width: 0; }
+#vue-ssh-conn .ssh-add-btn { margin: 0; flex-shrink: 0; }
+
+/* ---- 计数徽章:统一小 pill(chips / 分节标题 / 分组行共用) ---- */
+#vue-ssh-conn .ssh-pill {
+  font-size: 10.5px; line-height: 1; font-variant-numeric: tabular-nums;
+  color: var(--muted); background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 99px; padding: 3px 7px;
+}
+
+/* ---- 分组 chips:点击即过滤主机列表,active 高亮 ---- */
+/* inactive 用 var(--bg) 底 + 正文字色(比全局 .chip 的 muted 字提一档对比);hover 亮边框 + 微亮底 */
+#vue-ssh-conn .ssh-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+#vue-ssh-conn .ssh-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 99px;
+  padding: 4px 6px 4px 12px; cursor: pointer; user-select: none;
+  font-family: inherit; max-width: 240px; white-space: nowrap;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+#vue-ssh-conn .ssh-chip .ssh-chip-name { overflow: hidden; text-overflow: ellipsis; }
+#vue-ssh-conn .ssh-chip:hover { border-color: var(--accent); background: var(--panel2); }
+#vue-ssh-conn .ssh-chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-weak); }
+#vue-ssh-conn .ssh-chip.on .ssh-pill { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* ---- 主机列表:按分组分节(小标题,计数统一由 chips 的 pill 承担),行内名称/连接串分层 ---- */
+#vue-ssh-conn .ssh-host-sec { margin: 0 0 2px; }
+#vue-ssh-conn .ssh-sec-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 10.5px; letter-spacing: .8px; color: var(--muted);
+  user-select: none; margin: 4px 0 4px; padding-bottom: 3px; border-bottom: 1px solid var(--border);
+}
+#vue-ssh-conn .ssh-sec-empty { margin: 2px 2px 8px; }
+
+#vue-ssh-conn .ssh-host-row {
+  display: flex; align-items: center; gap: 10px;
+  min-height: 40px; padding: 6px 10px; margin: 4px 0;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+}
+#vue-ssh-conn .ssh-host-row:hover { border-color: var(--accent); background: var(--panel2); }
+#vue-ssh-conn .ssh-host-info { flex: 1; min-width: 0; }
+#vue-ssh-conn .ssh-host-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 连接串第二行:正文字色降不透明度,比 --muted 亮一档(深浅主题都可读) */
+#vue-ssh-conn .ssh-host-conn {
+  font-family: ui-monospace, Menlo, monospace; font-size: 11.5px;
+  color: var(--text); opacity: .78;
+  margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 行操作常显但低饱和(muted),hover 亮化;与密钥卡行的常显按钮一致,触屏同理可用 */
+#vue-ssh-conn .ssh-host-acts { display: flex; gap: 6px; flex-shrink: 0; }
+#vue-ssh-conn .ssh-host-acts button {
+  border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+  border-radius: 7px; font-size: 11.5px; padding: 5px 11px; min-height: 26px;
+  cursor: pointer; font-family: inherit;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+#vue-ssh-conn .ssh-host-acts button:hover { color: var(--text); border-color: var(--accent); }
+#vue-ssh-conn .ssh-host-acts .ssh-act-del:hover { color: var(--danger); border-color: var(--danger); }
+#vue-ssh-conn .ssh-host-acts .ssh-act-conn { color: var(--accent); border-color: var(--accent); }  /* 连接 = primary 描边 */
+#vue-ssh-conn .ssh-host-acts .ssh-act-conn:hover { background: var(--accent-weak); }
+
+/* ---- 编辑卡(弹出式,常驻 DOM 由 v-show 收起):两列网格 + 行内错误 + 底部按钮 ---- */
+#vue-ssh-conn .ssh-form-grid { display: grid; grid-template-columns: repeat(6, 1fr); column-gap: 10px; }
+#vue-ssh-conn .ssh-form-grid .field { margin-bottom: 10px; }
+#vue-ssh-conn .ssh-form-grid .sp-input { width: 100%; }
+#vue-ssh-conn .ssh-f-half { grid-column: span 3; }
+#vue-ssh-conn .ssh-f-user { grid-column: span 2; }
+#vue-ssh-conn .ssh-f-host { grid-column: span 3; }
+#vue-ssh-conn .ssh-f-port { grid-column: span 1; min-width: 0; }
+#vue-ssh-conn .ssh-f-full { grid-column: 1 / -1; }
+#vue-ssh-conn .ssh-form-err { color: var(--danger); font-size: 12px; margin: 0 0 6px; }
+#vue-ssh-conn .ssh-form-foot { display: flex; gap: 8px; margin-bottom: 8px; }
+@media (max-width: 620px) {
+  #vue-ssh-conn .ssh-form-grid { grid-template-columns: 1fr; }
+  #vue-ssh-conn .ssh-f-half, #vue-ssh-conn .ssh-f-user,
+  #vue-ssh-conn .ssh-f-host, #vue-ssh-conn .ssh-f-port { grid-column: auto; }
+}
+
+/* ---- 分组管理(轻量行,不再是大卡):名称 + 计数 + 调序/删除;新建输入与按钮同行 ---- */
+#vue-ssh-conn .ssh-group-rows { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 8px; }
+#vue-ssh-conn .ssh-group-row {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid transparent; border-radius: 8px; padding: 3px 6px 3px 10px;
+}
+#vue-ssh-conn .ssh-group-row:hover { border-color: var(--border); background: var(--panel); }
+#vue-ssh-conn .ssh-group-name {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#vue-ssh-conn .ssh-group-acts { display: flex; gap: 4px; flex-shrink: 0; }
+#vue-ssh-conn .ssh-group-acts .mini-btn { margin: 0; padding: 3px 9px; font-size: 11.5px; min-height: 24px; }
+#vue-ssh-conn .ssh-group-acts .mini-btn.icon { width: 28px; padding: 3px 0; text-align: center; }
+#vue-ssh-conn .ssh-group-new { display: flex; gap: 8px; align-items: center; }
+#vue-ssh-conn .ssh-group-new .sp-input { flex: 1; min-width: 0; }
+#vue-ssh-conn .ssh-group-new .mini-btn { margin: 0; }
+
+/* ---- 表单里的分组下拉:复用 .sp-input,补深色下拉的选项底色 ---- */
+#vue-ssh-conn select.sp-input { appearance: auto; cursor: pointer; }
+#vue-ssh-conn select.sp-input option, #ssh-host-sel option, #ssh-host-sel optgroup {
+  background: var(--panel); color: var(--text);
+}
+
+/* ---- 密钥管理卡外壳对齐(逻辑在 98-vue-keys.js,此处仅样式;ID 选择器优先于 vue-keys.css) ---- */
+#vue-ssh-keys .vk-card h3 { margin: 0 0 10px; }
+#vue-ssh-keys .vk-row { border-radius: 8px; transition: background .12s ease; }
+#vue-ssh-keys .vk-row:hover { background: var(--panel); }
