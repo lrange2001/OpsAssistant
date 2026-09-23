@@ -119,6 +119,15 @@ def _fuzzy(name, kw):
     return score
 
 
+def _ent_isdir(e):
+    """DirEntry 判目录,异常安全:SIP 受限路径(如 /usr/sbin/weakpass_edit)stat 直接抛
+    PermissionError,一次补全请求崩掉会打断 HTTP 连接(前端整页白屏的隐患源)。"""
+    try:
+        return e.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
+
+
 def dir_hints(q, limit=30):
     """路径补全(Ctrl+R / fzf 风格):
     - 输入以 / ~ 结尾或本身是目录 -> 列出其直接子项(浏览模式)
@@ -138,7 +147,7 @@ def dir_hints(q, limit=30):
                 for e in it:
                     if e.name.startswith(".") and not raw.endswith("/."):
                         continue
-                    items.append({"name": e.name, "dir": e.is_dir()})
+                    items.append({"name": e.name, "dir": _ent_isdir(e)})
         except OSError:
             pass
         items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
@@ -161,13 +170,13 @@ def dir_hints(q, limit=30):
             budget[0] += 1
             if e.name.startswith(".") and not kw.startswith("."):
                 continue
-            if e.is_dir() and e.name in _FUZZY_SKIP_DIRS:
+            if _ent_isdir(e) and e.name in _FUZZY_SKIP_DIRS:
                 continue
             s = _fuzzy(e.name, kw)
             if s is not None:
-                matches.append({"score": s + depth * 0.3 + (0 if e.is_dir() else 1.5),
-                                "item": {"name": e.path, "dir": e.is_dir()}})
-            if e.is_dir() and not e.is_symlink():
+                matches.append({"score": s + depth * 0.3 + (0 if _ent_isdir(e) else 1.5),
+                                "item": {"name": e.path, "dir": _ent_isdir(e)}})
+            if _ent_isdir(e) and not e.is_symlink():
                 walk(e.path, depth + 1)
 
     walk(root, 0)

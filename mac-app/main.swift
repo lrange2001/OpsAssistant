@@ -133,6 +133,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     @objc func zoomIn() { zoomStep = min(zoomStep + 0.1, 1.0) }
     @objc func zoomOut() { zoomStep = max(zoomStep - 0.1, -0.5) }
     @objc func actualSize() { zoomStep = 0 }
+    @objc func reloadPage() { renderRetries = 0; webView.reload() }
+
+    // 白屏自愈:导航失败自动重载;加载完成后校验确是本应用页(有 conn-dot),
+    // 不是则重载(限 3 次)。WKWebView 一次失败的加载不会自愈,而壳此前没有任何
+    // 重试入口,启动窗口撞上服务抖动就整窗白屏(2026-09-23 线上事故)
+    var renderRetries = 0
+    func retryLoad(_ error: Error) {
+        let ns = error as NSError
+        guard ns.code != NSURLErrorCancelled, renderRetries < 3 else { return }
+        renderRetries += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [self] in
+            webView.load(URLRequest(url: appURL))
+        }
+    }
+    func verifyRendered() {
+        if webView.url?.absoluteString == "about:blank" { return }   // 预热页不做校验
+        webView.evaluateJavaScript("!!document.getElementById('conn-dot')") { [self] r, _ in
+            if (r as? Bool) == true { renderRetries = 0; return }
+            guard renderRetries < 3 else { return }
+            renderRetries += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.webView.reload() }
+        }
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { verifyRendered() }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { retryLoad(error) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { retryLoad(error) }
 
     func buildMenu() {
         let mainMenu = NSMenu()
@@ -185,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         viewMenu.addItem(withTitle: "Zoom In", action: #selector(zoomIn), keyEquivalent: "+")
         viewMenu.addItem(withTitle: "Zoom Out", action: #selector(zoomOut), keyEquivalent: "-")
         viewMenu.addItem(withTitle: "Actual Size", action: #selector(actualSize), keyEquivalent: "0")
+        viewMenu.addItem(withTitle: "Reload Page", action: #selector(reloadPage), keyEquivalent: "r")
         viewMenu.addItem(NSMenuItem.separator())
         let fsItem = viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen), keyEquivalent: "f")
         fsItem.keyEquivalentModifierMask = [.command, .control]

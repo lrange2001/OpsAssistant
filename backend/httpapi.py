@@ -155,7 +155,12 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif path.startswith("/api/dir-hint"):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            self._json(dir_hints((qs.get("q") or [""])[0]))
+            try:
+                self._json(dir_hints((qs.get("q") or [""])[0]))
+            except Exception as e:
+                # 兜底:补全内部任何异常降级为错误响应——处理器裸崩会直接掐断 HTTP 连接,
+                # 前端连接反复被打断正是整页白屏的隐患源(2026-09-23 线上事故)
+                self._json({"ok": False, "error": "路径补全失败: %s" % type(e).__name__}, 500)
         elif path == "/api/ccswitch":
             cc = load_ccswitch_provider()
             self._json({"ok": True, "ccswitch": {

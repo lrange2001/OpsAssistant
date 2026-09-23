@@ -947,6 +947,16 @@ const PY = [
   "emit('D12: 容器与 k8s(docker ps / kubectl,装了才采)',",
   "     any(x.startswith('容器:') and 'web-1' in x for x in fl) and any(x.startswith('k8s:') and 'NotReady' in x and 'CrashLoopBackOff' in x for x in fl),",
   "     fl)",
+  "# D13 dir_hints 受限路径不崩:SIP 文件(/usr/sbin/weakpass_edit)stat 抛 PermissionError,",
+  "# 修复前 walk/列表模式裸崩,一次补全请求直接掐断 HTTP 连接(前端白屏隐患源)",
+  "from backend.textutil import dir_hints",
+  "for q13 in ['/usr/sbin/weak', '/usr/sbin/', '/usr/sbin/nopelist-zz']:",
+  "    try:",
+  "        rh13 = dir_hints(q13)",
+  "        good13 = rh13.get('ok') is True",
+  "    except Exception:",
+  "        good13 = False",
+  "    emit('D13: dir_hints(%r) 受限系统路径安全返回' % q13, good13, '')",
   "print('PYDONE', flush=True)",
 ].join("\n");
 
