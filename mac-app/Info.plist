@@ -24,6 +24,9 @@
 	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
+	<!-- 整夜挂机场景:禁用 App Nap,防页面定时器被系统合并导致轮询停摆 -->
+	<key>NSAppSleepDisabled</key>
+	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

@@ -52,8 +52,8 @@ async function sshPost(path, body) {
   const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   return await r.json();
 }
-function sshCols() { const el = $("ssh-screen"); return Math.max(20, Math.floor(((el ? el.clientWidth : 820) - 20) / termCharW(el))); }   // 实测字符宽、扣掉 padding,与 termCols 同一套
-function sshRows() { const el = $("ssh-screen"); const lh = el ? parseFloat(getComputedStyle(el).lineHeight) || 17 : 17; return Math.max(6, Math.floor(((el ? el.clientHeight : 320) - 20) / lh)); }
+function sshCols() { const el = $("ssh-screen"); const g = el ? termGeom(el) : null; return Math.max(20, Math.floor(((g ? g.w : 820) - 20) / termCharW(el))); }   // 实测字符宽、扣掉 padding,与 termCols 同一套;几何走 termGeom 缓存(轮询零布局读)
+function sshRows() { const el = $("ssh-screen"); const g = el ? termGeom(el) : null; return Math.max(6, Math.floor(((g ? g.h : 320) - 20) / (g ? g.lh : 17))); }
 function sshBadge() {
   const el = $("ssh-chip"); const c = sshActive();   // 徽章跟随面板实际显示的终端(ops 视图覆盖时与面板一致)
   if (!c) { el.style.display = "none"; return; }
@@ -192,13 +192,13 @@ async function sshConnect(hostId) {
       chat: curId,   // 配对发起连接的聊天会话(1:1)
       alive: true, pw: host.password || "", pwUsed: false,
       state: termMakeState(),
-      timer: null, pollBusy: false, lastKey: 0,
+      timer: null, pollBusy: false, lastKey: 0, wmark: 0,
     };
     sshSessions.push(ses);
     sshPersistMeta();
     renderSshTabs();
     $("ssh-host-sel").value = hostId;
-    $("ssh-screen").textContent = "";
+    termScreenClear($("ssh-screen"));
     sshOpenPanel();
     sshApply();
     sshPollKick(ses, 40);
@@ -230,7 +230,7 @@ function sshCloseSession(i, opts) {
   sshPersistMeta();
   opsRenderBar();   // 关了终端顺带重画 ops 等待条(渲染时修剪布防已失效的终端)
   if (!sshSessions.length) {
-    $("ssh-screen").textContent = "";
+    termScreenClear($("ssh-screen"));
     renderSshTabs();
     sshBadge();
     if (!opts || !opts.keepPanel) sshClosePanel();
@@ -238,7 +238,7 @@ function sshCloseSession(i, opts) {
   }
   renderSshTabs();
   if (sshActive()) { sshApply(); sshBadge(); sshFit(); }
-  else { $("ssh-screen").textContent = ""; sshBadge(); }   // 当前无可视终端:会话保留(关的是配对终端且无覆盖)
+  else { termScreenClear($("ssh-screen")); sshBadge(); }   // 当前无可视终端:会话保留(关的是配对终端且无覆盖)
 }
 function sshReconnect() {
   const c = sshActive();
@@ -274,6 +274,35 @@ function sshPollKick(ses, delay) {
   if (ses.timer) clearTimeout(ses.timer);
   ses.timer = setTimeout(() => { ses.timer = null; sshPoll(ses); }, delay || 40);
 }
+/* 轮询失败恢复:/api/ssh/data 的响应在服务端已把 out 取走,客户端若解析失败这批字节就永久丢了;
+   按 wmark 从服务端 hist 原始流重放缺口(sync 锁内清 out,不会与轮询重复渲染) */
+async function sshResync(ses) {
+  if (!ses || !sshSessions.includes(ses) || !ses.alive) return;
+  try {
+    const j = await (await fetch("/api/ssh/sync?sid=" + encodeURIComponent(ses.sid) + "&offset=" + (ses.wmark || 0) + "&max_bytes=262144")).json();
+    if (!j.ok) return;
+    if (j.data) {
+      termFeed(ses.state, j.data, sshCols(), sshRows());
+      if (sshActive() === ses) sshApply();
+    }
+    ses.wmark = Math.max(ses.wmark || 0, j.written || 0);
+  } catch {}
+}
+/* 重挂重放:服务端 hist 是终端字节的权威存量,重载后取最近窗口的原始流喂 vt100 网格——
+   屏幕随重载还原(布防命令的回显不再凭空消失);成功后 wmark 对齐再起轮询,失败回落旧行为(空屏+常规轮询) */
+async function sshReplay(ses) {
+  try {
+    const j = await (await fetch("/api/ssh/sync?sid=" + encodeURIComponent(ses.sid) + "&offset=0&max_bytes=131072")).json();
+    if (j.ok) {
+      if (j.data) {
+        termFeed(ses.state, j.data, sshCols(), sshRows());
+        if (sshActive() === ses) sshApply();
+      }
+      ses.wmark = j.written || 0;
+    }
+  } catch {}
+  sshPollKick(ses, 60);
+}
 async function sshPoll(ses) {
   if (!ses || !sshSessions.includes(ses) || ses.pollBusy || !ses.alive) return;
   ses.pollBusy = true;
@@ -286,6 +315,7 @@ async function sshPoll(ses) {
       if (sshActive() === ses) sshApply();   // 只有面板正在显示的终端才需要重绘(后台终端只积累状态)
       sshMaybeAutoPw(ses);
     }
+    if (j.ok && typeof j.written === "number") ses.wmark = j.written;   // 字节游标:轮询失败重同步(sshResync)的起点
     if (j.exited != null && ses.alive) {
       ses.alive = false;
       termAppendText(ses.state,
@@ -298,7 +328,7 @@ async function sshPoll(ses) {
       ses.pollBusy = false;
       return;
     }
-  } catch {}
+  } catch { await sshResync(ses); }
   ses.pollBusy = false;
   if (!ses.alive) return;
   if (ses.timer) return;   // 已被回显 kick 排了更快的
@@ -308,18 +338,20 @@ async function sshPoll(ses) {
 function sshApply() {
   const el = $("ssh-screen");
   const c = sshActive();
-  if (!c) { el.textContent = ""; return; }
+  if (!c) { termScreenClear(el); return; }
   termApplyText(el, c.state, c.alive);
 }
 function sshFit() {
   const el = $("ssh-screen");
   const c = sshActive();
   if (!el || !$("ssh-panel").classList.contains("open") || !c) return;
+  termGeomDirty(el);   // 开合/拖宽后的几何重读点(缓存失效)
   const cols = sshCols(), rows = sshRows();
-  if (c.state.main) screenResize(c.state.main, cols, rows);  // 主屏保内容调格
+  if (c.state.main) { screenResize(c.state.main, cols, rows); c.state.__rev++; }  // 主屏保内容调格;调格改渲染 → 失效幂等门
   // 只在尺寸真变了才重建屏幕模型(无条件重建会与输出竞态清掉内容);resize 后全屏程序收到 SIGWINCH 自行重画
   if (c.state.alt && c.state.screen && (c.state.screen.cols !== cols || c.state.screen.rows !== rows)) {
     c.state.screen = screenMake(cols, rows);
+    c.state.__rev++;   // 重建备用屏改渲染:下面的 sshApply 需真渲染(幂等门放行)
     sshApply();
   }
   fetch("/api/ssh/resize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: c.sid, cols, rows }) });
@@ -353,9 +385,9 @@ async function sshReattach() {
       const ses = { sid: x.sid, label: x.label, hostId: x.host_id, key: x.key,
         chat: cs ? cs.id : curId,
         alive: true, pw: host.password || "", pwUsed: false,
-        state: termMakeState(), timer: null, pollBusy: false, lastKey: 0 };
+        state: termMakeState(), timer: null, pollBusy: false, lastKey: 0, wmark: 0 };
       sshSessions.push(ses);
-      sshPollKick(ses, 60);
+      sshReplay(ses);
     }
     sshPersistMeta();   // 剪掉各会话已死 sid 的配对并落盘
     if (listDirty) renderSessionList();

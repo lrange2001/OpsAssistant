@@ -9,6 +9,17 @@ function setGenerating(on, sid, turn) {
   updatePlaceholder();
   renderSessionList();
 }
+/* 流式绘制合帧:同一帧内到达的多个 delta/reasoning 只落一次 DOM + 一次贴底滚动。
+   数据仍逐事件累积(live.content 等),渲染时取最新值 —— 长会话下把每事件的
+   全量 innerHTML 重解析与 scrollHeight 强制回流压到每帧至多一次,视觉节奏不变 */
+let _livePaintQ = null;
+function queueLivePaint(fn) {
+  if (!_livePaintQ) {
+    _livePaintQ = [];
+    requestAnimationFrame(() => { const q = _livePaintQ; _livePaintQ = null; for (const f of q) f(); });
+  }
+  _livePaintQ.push(fn);
+}
 /* ZCode:流式 + 有草稿 → 发送键(排队/引导);空草稿 → Stop(只看当前会话) */
 function hasDraft() {
   return !!($("input").value.trim() || attachments.length || activeSkills.length || activeQuotes.length);
@@ -183,19 +194,25 @@ async function runTurn({ executePending = false, session = null } = {}) {
           closeThink();
           live.content += ev.content;
           if (liveEls && liveEls.thinkBox && liveEls.thinkBox.open) liveEls.thinkBox.open = false; // 正文开始,收起思考
-          const b = ensureBubble();
-          if (b) {
-            if (live._expanded) fillBubble(b, live);                       // 用户显式展开流式正文:照旧全量渲染
-            else if (live._folded) updateFoldTail(b, live.content, true);  // 折叠态:只更新尾节点与指示条
-            else if (shouldFold(live.content)) { live._folded = true; buildFoldBubble(b, live.content, true); }
-            else b.innerHTML = md2html(live.content);
-            scrollBottom();
-          }
+          queueLivePaint(() => {
+            if (LIVE_TURNS.get(s.id) !== turn) return;   // 回合已结束(定稿/中断已重渲):过期帧丢弃
+            const b = ensureBubble();
+            if (b) {
+              if (live._expanded) fillBubble(b, live);                       // 用户显式展开流式正文:照旧全量渲染
+              else if (live._folded) updateFoldTail(b, live.content, true);  // 折叠态:只更新尾节点与指示条
+              else if (shouldFold(live.content)) { live._folded = true; buildFoldBubble(b, live.content, true); }
+              else b.innerHTML = md2html(live.content);
+              scrollBottom();
+            }
+          });
         } else if (ev.type === "reasoning") {
           if (!thinkStart) thinkStart = Date.now();
           live.reasoning += ev.content;
-          const el = ensureThink();
-          if (el) { el.textContent = live.reasoning; el.scrollTop = el.scrollHeight; scrollBottom(); }
+          queueLivePaint(() => {
+            if (LIVE_TURNS.get(s.id) !== turn) return;
+            const el = ensureThink();
+            if (el) { el.textContent = live.reasoning; el.scrollTop = el.scrollHeight; scrollBottom(); }
+          });
         } else if (ev.type === "round") {
           closeThink();
           if (live.reasoning) turnThinkDurs.push(thinkDur);

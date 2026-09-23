@@ -301,6 +301,12 @@
   #welcome .sug:hover { border-color: var(--accent); color: var(--accent); }
 
   .msg { display: flex; gap: 10px; margin-bottom: 18px; }
+  /* 长会话性能:进入过视口的消息(cvd 标记,20-timeline 用 IntersectionObserver 打上)离开
+     视口后跳过布局/绘制(content-visibility),contain-intrinsic-size 的 auto 会记忆其真实高度,
+     滚动几何不漂移;从未进过视口的消息不标记、始终完整布局 —— 不让估高占位进滚动几何 */
+  #messages .msg.cvd { content-visibility: auto; contain-intrinsic-size: auto 320px; }
+  /* 查找命中(含命中后自动展开的折叠气泡)不跳过渲染:命中即出画,平滑滚动到位途中也可读可复制 */
+  #messages .msg:has(.find-hit), #messages .msg:has(.find-cur) { content-visibility: visible; }
   .msg .avatar {
     width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center;
     justify-content: center; font-size: 13px; font-weight: 700; color: var(--muted);

@@ -43,9 +43,17 @@ async function opsTrigger(owner, label) {
   toast("ops: " + label + " 已回车执行,但等待会话压缩完成超时——可用 /vvv 手动读取输出后继续", "warn");
 }
 
+/* 撤回布防命令在远端输入行里的字符(^U 清行;vim 等全屏程序内不发,按键会打进程序) */
+function opsWithdrawLine(ses) {
+  if (ses && ses.alive && !ses.state.alt) sshWriteTo(ses, "\x15");
+}
+
 /* 清空全部布防(/ops 取消等入口);有内容才提示。返回是否真的取消了东西 */
 function opsCancelArmed() {
   const had = OPS.armed.size > 0;
+  for (const a of Array.from(OPS.armed.values())) {
+    opsWithdrawLine(sshSessions.find(x => x.sid === a.sid) || null);   // 取消 = 连远端输入行里的命令一起撤走,之后的回车不会再误执行
+  }
   OPS.armed.clear();
   opsPersist();
   opsRenderBar();
@@ -72,7 +80,7 @@ function opsRenderBar() {
     chip.title = "回车已发往该终端,等待你在终端里按回车后自动读取输出";
     chip.innerHTML = `<span class="lbl">ops</span><span class="tx"></span><button title="取消此等待">x</button>`;
     chip.querySelector(".tx").textContent = "等待回车 · " + a.label;
-    chip.querySelector("button").onclick = () => { OPS.armed.delete(a.sid); opsPersist(); opsRenderBar(); };
+    chip.querySelector("button").onclick = () => { OPS.armed.delete(a.sid); opsWithdrawLine(sshSessions.find(x => x.sid === a.sid) || null); opsPersist(); opsRenderBar(); };
     chips.push(chip);
   }
   // 读取输出中:lastRead 归属当前会话且其回合仍在生成(回合结束提示条自行消失)

@@ -264,6 +264,8 @@ async function init() {
   });
   $("ssh-hidden").addEventListener("paste", (e) => {
     const t = (e.clipboardData || window.clipboardData).getData("text");
+    // 多行粘贴自带「回车」语义:终端正布防等回车时先触发人审,否则布防命令被粘进的换行执行而提示条永卡
+    if (t && /[\r\n]/.test(t)) { const c = sshActive(); if (c && !c.state.alt) opsOnEnter(c); }
     if (t) sshSend(t);
     e.preventDefault();
   });

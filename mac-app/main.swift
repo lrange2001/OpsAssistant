@@ -14,7 +14,8 @@ var serverPyPath: String {
     (Bundle.main.resourceURL?.path ?? ".") + "/app/server.py"
 }
 
-/// TCP 端口是否可连(判断服务是否已在跑)
+/// TCP 端口是否可连(判断服务是否已在跑);非阻塞 connect + poll 限时,
+/// 端口半死(SYN 被丢不回 RST)时最多等 300ms,不会把调用方挂住 75 秒
 func portOpen(_ port: Int) -> Bool {
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
@@ -23,20 +24,34 @@ func portOpen(_ port: Int) -> Bool {
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     guard fd >= 0 else { return false }
     defer { close(fd) }
+    _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)   // 非阻塞:connect 立即返回
     let r = withUnsafePointer(to: &addr) {
         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
             connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
         }
     }
-    return r == 0
+    if r == 0 { return true }   // 回环畅通时立即连上
+    guard errno == EINPROGRESS else { return false }   // ECONNREFUSED 等:端口确实没开
+    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+    guard poll(&pfd, 1, 300) > 0 else { return false }   // 最多等 300ms,超时视为不通
+    var err: Int32 = 0
+    var len = socklen_t(MemoryLayout<Int32>.size)
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)
+    return err == 0
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     var children: [Process] = []
+    var appNapAssertion: NSObjectProtocol?   // 活动断言须强持有到 app 结束,释放即失效
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // 整夜挂机:持活动断言禁用 App Nap,防页面定时器被系统合并导致轮询停摆;
+        // 只禁小睡不阻止系统休眠(休眠与否交给用户的节能设置)
+        appNapAssertion = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep, reason: "整夜值守轮询")
+
         buildMenu()
 
         // 系统通知:完成/出错/等待确认时前端经 webkit.messageHandlers.notify 发来
@@ -81,14 +96,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.contentView = content
         window.makeKeyAndOrderFront(nil)
 
+        // 预热:立即加载 about:blank 拉起 WebContent 进程,等端口就绪的真导航
+        // 不再付首次导航的进程启动成本(与 python 启动完全并行)
+        webView.load(URLRequest(url: URL(string: "about:blank")!))
         loadWhenReady()
     }
 
     /// 等 8090 就绪(最多 15 秒)再加载页面
     func loadWhenReady() {
         DispatchQueue.global().async { [self] in
-            for _ in 0..<50 where !portOpen(8090) {
-                Thread.sleep(forTimeInterval: 0.3)
+            // 轮询节奏自适应:冷启动窗口(前 2 秒)20ms 密集探测,listen 一到立刻加载,
+            // 之后放宽到 100ms;总预算仍是 15 秒。原固定 300ms 间隔平均空等 150ms。
+            var waited = 0.0
+            while !portOpen(8090) && waited < 15 {
+                let step: Double = waited < 2 ? 0.02 : 0.1
+                Thread.sleep(forTimeInterval: step)
+                waited += step
             }
             DispatchQueue.main.async { self.webView.load(URLRequest(url: appURL)) }
         }
@@ -265,8 +288,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         for p in children where p.isRunning {
             p.terminate()
         }
-        Thread.sleep(forTimeInterval: 0.5)
-        return .terminateNow
+        // 后台最多等 0.5 秒(50ms 一档,python 退出即止)让 SIGTERM 送达再确认退出,主线程不睡
+        DispatchQueue.global().async {
+            for _ in 0..<10 where self.children.contains(where: { $0.isRunning }) {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 

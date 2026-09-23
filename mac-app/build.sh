@@ -35,6 +35,8 @@ mkdir -p "$APP/Contents/Resources/app"
 cp ../server.py ../index.html "$APP/Contents/Resources/app/"
 cp -R ../backend "$APP/Contents/Resources/app/backend"
 rm -rf "$APP/Contents/Resources/app/backend/__pycache__"   # 不把开发机字节码打进包
+# 预编译字节码:首启免现场编译 .py(实测省约 100ms);打包机与运行机同为本机,pyc 无版本错配问题
+python3 -m compileall -q "$APP/Contents/Resources/app/backend"
 cp -R ../static "$APP/Contents/Resources/app/static"
 touch "$APP"
 

@@ -173,6 +173,55 @@ class TermSession:
             return {"text": term_clean(data), "next_offset": start + len(data),
                     "base_offset": self.base, "truncated": truncated}
 
+    def read_marked(self):
+        """read() + 字节游标:同一把锁里取走 out 并快照 written——轮询方据此维护 wmark,
+        失败重同步(sync_raw)才不重不漏"""
+        with self.lock:
+            chunks = list(self.out)
+            self.out.clear()
+            return b"".join(chunks).decode("utf-8", "replace"), self.written
+
+    def sync_raw(self, offset, max_bytes):
+        """原始流重同步(页面重挂重建屏幕 / 轮询失败恢复用):锁内从 hist 取未消费窗口的
+        原始字节(保留转义序列供前端 vt100 网格重放,不做 term_clean),并把 out 重建为窗口
+        之后的余量——窗口内字节不丢,out 里也不会再有已重放过的字节(不会经轮询二次渲染)。
+        首次全量(offset<=base)且存量超窗时取最新尾部窗口,与 buffer_slice 同语义。"""
+        with self.lock:
+            truncated = int(offset) < self.base
+            start = max(int(offset), self.base)
+            headtrim = False
+            if int(offset) <= self.base and self.written - start > int(max_bytes):
+                start = max(self.base, self.written - int(max_bytes))
+                truncated = True
+                headtrim = True
+            if start >= self.written:
+                return {"data": "", "written": self.written, "base_offset": self.base,
+                        "truncated": truncated}
+            lo = start - self.base
+            if headtrim:   # 头部裁剪回退行首:整行重放,提示符/命令行不拦腰截断
+                roll = self.hist.rfind(b"\n", max(0, lo - 512), lo)
+                if roll >= 0:
+                    lo = roll + 1
+                    start = self.base + lo
+            end = min(start + int(max_bytes), self.written)
+            data = bytes(self.hist[lo:end - self.base])
+            for _ in range(3):   # 尾部不完整 UTF-8 序列截掉,游标停在完整边界(余量回填 out)
+                try:
+                    data.decode("utf-8")
+                    break
+                except UnicodeDecodeError as e:
+                    if len(data) - e.start <= 3:
+                        data = data[:e.start]
+                    else:
+                        break
+            end = start + len(data)
+            self.out.clear()
+            rest = bytes(self.hist[end - self.base:])
+            if rest:
+                self.out.append(rest)
+            return {"data": data.decode("utf-8", "replace"), "written": end,
+                    "base_offset": self.base, "truncated": truncated}
+
     def read(self):
         with self.lock:
             chunks = list(self.out)

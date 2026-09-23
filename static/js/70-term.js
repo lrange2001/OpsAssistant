@@ -30,7 +30,8 @@ function sideOnOpen() {
 /* ---- PTY 终端 ---- */
 let termSid = null, termTimer = null;
 // 终端状态:主屏(滚动模式,带回滚历史)+ 备用屏(全屏程序)双网格;tail = 原始字节尾部(密码提示检测用)
-function termMakeState() { return { main: null, alt: false, screen: null, savedMain: null, tail: "", pend: "" }; }
+// __rev = 渲染修订号:每次喂入/调格自增;termApplyText 据此跳过无变化的整屏渲染(幂等门)
+function termMakeState() { return { main: null, alt: false, screen: null, savedMain: null, tail: "", pend: "", __rev: 0 }; }
 const termState = termMakeState();
 function stripAnsi(s) {
   return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "").replace(/\x1b[=>]/g, "");
@@ -100,10 +101,27 @@ function screenReverseIndex(sc) {  // 光标上移一行;已在顶部则整屏�
   if (sc.cy <= 0) { sc.grid.unshift(screenBlankRow(sc)); sc.grid.pop(); }
   else sc.cy--;
 }
+const _PRINT_SCAN = /[\x00-\x1f]/g;   // 可打印段扫描器:一次原生扫描定位下一个控制字符,长文本块免逐字符解释
 function screenFeed(sc, data) {
   let i = 0;
   while (i < data.length) {
     const ch = data[i];
+    if (ch >= " ") {   // 可打印段(含 0x7f 与未处理的 0x1c-0x1f:与旧逐字符路径同语义,照写格子)
+      _PRINT_SCAN.lastIndex = i + 1;
+      const pm = _PRINT_SCAN.exec(data);
+      const end = pm ? pm.index : data.length;
+      let j = i;
+      while (j < end) {
+        if (sc.wrap) { sc.wrap = false; sc.cx = 0; screenIndex(sc); }   // DECAWM 延迟换行:上一字符写满末列,这里才真换行
+        const cx = sc.cx, avail = sc.cols - cx, take = Math.min(avail, end - j);
+        if (sc.cy < sc.rows) { const row = sc.grid[sc.cy]; for (let k = 0; k < take; k++) row[cx + k] = data[j + k]; }
+        j += take;
+        if (take === avail) { sc.wrap = true; sc.cx = sc.cols - 1; }   // 写满末列:挂起换行、cx 停末列(同逐字符)
+        else sc.cx = cx + take;
+      }
+      i = end;
+      continue;
+    }
     if (ch === "\x1b") {
       const nx = data[i + 1];
       if (nx === "[") {
@@ -196,6 +214,7 @@ function _holdIdx(raw) {
   return n;
 }
 function termFeed(st, raw, cols, rows) {
+  st.__rev++;   // 任何喂入都可能改屏:渲染修订号自增,termApplyText 的幂等门放行重渲染
   st.tail = (st.tail + raw).slice(-256);   // 原始字节尾部:password: 提示检测等用(与渲染无关)
   if (!st.main) st.main = screenMake(cols, rows);
   raw = st.pend + raw; st.pend = "";       // 拼上一块扣留的序列头,再做备用屏切分
@@ -219,14 +238,36 @@ function termFeed(st, raw, cols, rows) {
   if (st.alt) screenFeed(st.screen, tail); else screenFeed(st.main, tail);
 }
 function termAppendText(st, s) {  // 应用层文本(退出横幅等):退出备用屏后写进主屏
+  st.__rev++;   // 改屏:渲染修订号自增(幂等门放行)
   if (st.alt) { st.alt = false; st.screen = null; st.main = st.savedMain || st.main || screenMake(80, 24); st.savedMain = null; }
   if (!st.main) st.main = screenMake(80, 24);
   screenFeed(st.main, s);
 }
+/* 贴底判定:scroll 监听维护 __termStick(距底不足约一行 = 贴底,上翻即失贴)。
+   scroll 事件只在渲染步异步派发(布局已算好),这里的 scrollHeight/clientHeight 读取是缓存命中
+   而非强制回流,且永远不在写布局的同一个任务里 —— 渲染热路径(termApplyText)保持零布局读 */
+function termWatchScroll(el) {
+  if (el.__termScrollWatched) return;
+  el.__termScrollWatched = true;
+  el.addEventListener("scroll", () => {
+    el.__termStick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }, { passive: true });
+}
+function termScreenClear(el) {   // 清屏唯一正道:顺带失效渲染缓存与贴底标记,幂等门不会对着空 DOM 误判「已渲染」
+  el.textContent = "";
+  el.__termSt = null; el.__termRev = undefined; el.__termAlive = undefined;
+  el.__termStick = true;   // 清屏即贴底:新内容从头跟随
+}
 function termApplyText(el, st, alive) {
+  termWatchScroll(el);
+  // 幂等门:自上次渲染后状态修订号没动(轮询空转/切面板/ops 视图切换等重复 apply)→ 连整屏字符串都不必构建
+  if (el.__termSt === st && el.__termRev === st.__rev && el.__termAlive === alive) return;
   const sc = st.alt ? st.screen : st.main;
   const txt = sc ? screenRender(sc, alive) : "";
-  if (el.textContent === txt) return;   // 内容没变不碰 DOM:选区与滚动位置原样保留(双击选中后可从容 Cmd+C)
+  if (el.textContent === txt) {   // 内容没变不碰 DOM:选区与滚动位置原样保留(双击选中后可从容 Cmd+C)
+    el.__termSt = st; el.__termRev = st.__rev; el.__termAlive = alive;
+    return;
+  }
   // 选中文字时出了新输出:若选中的那段在新文本里原样还在(只有别处变了),写回后按原偏移还原选区,复制不被打断
   const sel = window.getSelection();
   let keep = null;
@@ -251,7 +292,10 @@ function termApplyText(el, st, alive) {
       sel.addRange(r2);
     } catch (e) {}
   }
-  el.scrollTop = el.scrollHeight;
+  // 贴底跟随,只写不读:超大值由引擎钳到最大滚动位(等价 scrollTop=scrollHeight)但 JS 侧零布局读;
+  // 用户上翻过(__termStick=false)绝不抢。钳位目标与任何测量值无关,高度只增不振荡 —— 振荡死循环的结构性免疫
+  if (el.__termStick !== false) el.scrollTop = 1e9;
+  el.__termSt = st; el.__termRev = st.__rev; el.__termAlive = alive;
 }
 /* 终端选区复制(Mac 习惯:双击/拖拽选中文字后 Cmd+C 拷走;无选区返回 false,不拦截按键) */
 function copyTermSelection() {
@@ -277,7 +321,7 @@ async function termEnsure() {
     })).json();
     if (!j.ok) return;
     termSid = j.sid; Object.assign(termState, termMakeState());
-    $("term-screen").textContent = "";
+    termScreenClear($("term-screen"));
     termPollKick();
   } catch {}
 }
@@ -298,8 +342,30 @@ function termCharW(el) {
   }
   return _termCharW || 7.2;
 }
-function termCols() { const el = $("term-screen"); return Math.max(20, Math.floor(((el ? el.clientWidth : 620) - 20) / termCharW(el))); }
-function termRows() { const el = $("term-screen"); const lh = el ? parseFloat(getComputedStyle(el).lineHeight) || 17 : 17; return Math.max(6, Math.floor(((el ? el.clientHeight : 320) - 20) / lh)); }
+/* 几何缓存:clientWidth/clientHeight/getComputedStyle 背后是(可能强制的)布局计算,轮询每 tick
+   都读会与 textContent 写形成同 tick 读写交错 —— 布局抖动的粮草。这里只在缓存被打脏后读一次:
+   失效点 = 窗口 resize / ResizeObserver(面板开合、拖宽都会改元素盒尺寸)/ Fit 路径主动打脏。
+   无 ResizeObserver 的老引擎退化为每次直读(与旧行为一致) */
+function termGeom(el) {
+  let g = el.__termGeom;
+  if (!g) {
+    let lh = 17;
+    try { lh = parseFloat(getComputedStyle(el).lineHeight) || 17; } catch (e) {}
+    g = el.__termGeom = { w: el.clientWidth, h: el.clientHeight, lh };
+  }
+  return g;
+}
+function termGeomDirty(el) { if (el) el.__termGeom = null; }
+(function () {
+  const drop = (el) => { if (el) el.__termGeom = null; };
+  window.addEventListener("resize", () => { drop($("term-screen")); drop($("ssh-screen")); });
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(entries => { for (const e of entries) drop(e.target); });
+    for (const id of ["term-screen", "ssh-screen"]) { const el = document.getElementById(id); if (el) ro.observe(el); }
+  }
+})();
+function termCols() { const el = $("term-screen"); const g = el ? termGeom(el) : null; return Math.max(20, Math.floor(((g ? g.w : 620) - 20) / termCharW(el))); }
+function termRows() { const el = $("term-screen"); const g = el ? termGeom(el) : null; return Math.max(6, Math.floor(((g ? g.h : 320) - 20) / (g ? g.lh : 17))); }
 function termPollKick() { if (termTimer) { clearTimeout(termTimer); termTimer = null; } termPoll(); }
 async function termPoll() {
   if (!termSid || termPollBusy) return;
@@ -338,10 +404,12 @@ function termSend(data) {
 function termFit() {
   const el = $("term-screen");
   if (!el || !$("sidepane").classList.contains("open")) return;
+  termGeomDirty(el);   // 开合/拖宽后的几何重读点(缓存失效)
   const cols = termCols(), rows = termRows();
-  if (termState.main) screenResize(termState.main, cols, rows);  // 主屏保内容调格;无关小抖动由 screenResize 内判尺寸真变才动
+  if (termState.main) { screenResize(termState.main, cols, rows); termState.__rev++; }  // 主屏保内容调格;无关小抖动由 screenResize 内判尺寸真变才动;调格改渲染 → 失效幂等门
   if (termState.alt && (!termState.screen || termState.screen.cols !== cols || termState.screen.rows !== rows)) {
     termState.screen = screenMake(cols, rows);  // 尺寸真变了才重建(全屏程序会自行重画),无条件重建会清掉内容
+    termState.__rev++;
   }
   if (termSid) fetch("/api/term/resize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: termSid, cols, rows }) });
 }
@@ -349,7 +417,7 @@ function termReset() {
   if (termSid) { fetch("/api/term/dispose", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: termSid }) }); }
   termSid = null; Object.assign(termState, termMakeState());
   if (termTimer) { clearTimeout(termTimer); termTimer = null; }
-  $("term-screen").textContent = "";
+  termScreenClear($("term-screen"));
   termEnsure();
 }
 const TERM_KEYS = { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b", ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D", Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~" };

@@ -88,12 +88,23 @@ class Handler(BaseHTTPRequestHandler):
                      ".woff2": "font/woff2"}.get(os.path.splitext(fp)[1].lower(),
                                                  "application/octet-stream")
             try:
+                # ETag 协商缓存(mtime+size):本地壳二次启动走 304 免传正文(约 565KB);
+                # no-cache = 可缓存但每次校验,文件一改 ETag 即变,开发刷新也能拿到新内容
+                st = os.stat(fp)
+                etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    return
                 with open(fp, "rb") as f:
                     data = f.read()
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(data)
             except OSError:
@@ -173,7 +184,8 @@ class Handler(BaseHTTPRequestHandler):
             if not s:
                 self._json({"ok": False, "error": "会话不存在"}, 404)
             else:
-                self._json({"ok": True, "data": s.read(), "exited": s.exited})
+                text, w = s.read_marked()
+                self._json({"ok": True, "data": text, "exited": s.exited, "written": w})
         elif path in ("/api/term/buffer", "/api/ssh/buffer"):
             # /vvv 与抓取终端增量的唯一数据源:服务端 ring buffer 按字节 offset 取窗口
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -189,6 +201,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "offset/max_bytes 需为数字"}, 400)
                 return
             self._json({"ok": True, **s.buffer_slice(offset, max_bytes)})
+        elif path in ("/api/term/sync", "/api/ssh/sync"):
+            # 原始流重同步(重挂重建屏幕 / 轮询失败恢复):与 buffer 的纯文本窗口互补,
+            # 保留转义序列供前端 vt100 网格重放,锁内清 out 保证不与轮询重复渲染
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            mgr = TERMS if path == "/api/term/sync" else SSHS
+            s = mgr.get((qs.get("sid") or [""])[0])
+            if not s:
+                self._json({"ok": False, "error": "会话不存在"}, 404)
+                return
+            try:
+                offset = max(0, int((qs.get("offset") or ["0"])[0]))
+                max_bytes = min(max(1, int((qs.get("max_bytes") or ["131072"])[0])), 262144)
+            except ValueError:
+                self._json({"ok": False, "error": "offset/max_bytes 需为数字"}, 400)
+                return
+            self._json({"ok": True, **s.sync_raw(offset, max_bytes)})
         elif path == "/api/ssh/hosts":
             cfg = load_config()
             self._json({"ok": True, "hosts": cfg.get("ssh_hosts") or [],
@@ -204,7 +232,8 @@ class Handler(BaseHTTPRequestHandler):
             if not s:
                 self._json({"ok": False, "error": "会话不存在"}, 404)
             else:
-                self._json({"ok": True, "data": s.read(), "exited": s.exited, "label": s.label})
+                text, w = s.read_marked()
+                self._json({"ok": True, "data": text, "exited": s.exited, "label": s.label, "written": w})
         elif path == "/api/ssh/status":
             self._json(ssh_status())
         elif path == "/api/fs/list":

@@ -62,6 +62,46 @@ async function serverSideTests() {
   ok("srv: offset 越界容错拉回", j.ok && j.text === "" && j.next_offset < 999999999);
   j = await (await fetch(BASE + `/api/term/buffer?sid=not-exist&offset=0`)).json();
   ok("srv: 不存在 sid 404", !j.ok);
+  // 1c) sync 原始流重同步(重挂重放/轮询失败恢复的数据源):保留转义序列、窗口清 out 不重不漏
+  const sidS = (await (await fetch(BASE + "/api/term/create", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cols: 90, rows: 26 }),
+  })).json()).sid;
+  await sleep(1200);
+  await fetch(BASE + "/api/term/write", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sid: sidS, data: "echo SYNC-A\r" }),
+  });
+  await sleep(1200);
+  let js = await (await fetch(BASE + `/api/term/sync?sid=${sidS}&offset=0`)).json();
+  ok("srv: sync 全量窗口含回显且保留转义序列", js.ok && js.data.includes("SYNC-A") && js.data.includes("\x1b"));
+  ok("srv: sync 游标对齐(written)", typeof js.written === "number" && js.written > 0);
+  js = await (await fetch(BASE + `/api/term/sync?sid=${sidS}&offset=${js.written}`)).json();
+  ok("srv: sync 增量为空(游标之后无新字节)", js.ok && js.data === "");
+  const wB = js.written;
+  await fetch(BASE + "/api/term/write", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sid: sidS, data: "echo SYNC-B\r" }),
+  });
+  await sleep(1200);
+  js = await (await fetch(BASE + `/api/term/sync?sid=${sidS}&offset=${wB}`)).json();
+  ok("srv: sync 增量含新内容", js.ok && js.data.includes("SYNC-B"));
+  let jd = await (await fetch(BASE + `/api/term/data?sid=${sidS}`)).json();
+  ok("srv: sync 后轮询不重发已重放字节(out 已清)", jd.ok && !jd.data.includes("SYNC-B") && typeof jd.written === "number");
+  const wC = js.written;
+  await fetch(BASE + "/api/term/write", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sid: sidS, data: "echo SYNC-C\r" }),
+  });
+  await sleep(1200);
+  jd = await (await fetch(BASE + `/api/term/data?sid=${sidS}`)).json();   // 模拟「响应已被 drain 但客户端解析失败」
+  ok("srv: data 响应带 written 游标(失败重同步起点)", jd.ok && jd.data.includes("SYNC-C") && jd.written >= wC);
+  js = await (await fetch(BASE + `/api/term/sync?sid=${sidS}&offset=${wC}`)).json();
+  ok("srv: 轮询失败按 wmark 从 hist 重同步不丢字节", js.ok && js.data.includes("SYNC-C"));
+  await fetch(BASE + "/api/term/dispose", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sid: sidS }),
+  });
   await fetch(BASE + "/api/term/dispose", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sid }),
@@ -294,7 +334,7 @@ window.fetch = async (url, opts) => {
       const ses = S.bySid(qs.get("sid"));
       if (!ses) return reply({ ok: false, error: "no session" }, 404);
       const data = ses.out; ses.out = "";
-      return reply({ ok: true, data, exited: ses.exited });
+      return reply({ ok: true, data, exited: ses.exited, written: ses.hist.length });
     }
     if (path === "buffer") {
       const ses = S.bySid(qs.get("sid"));
@@ -303,6 +343,17 @@ window.fetch = async (url, opts) => {
       const maxB = parseInt(qs.get("max_bytes") || "65536");
       const text = ses.hist.slice(off, off + maxB);
       return reply({ ok: true, text, next_offset: Math.min(ses.hist.length, off + maxB), base_offset: 0, truncated: false });
+    }
+    if (path === "sync") {   // 原始流重同步(与服务端 sync_raw 同语义:窗口清 out,不与轮询重复渲染)
+      const ses = S.bySid(qs.get("sid"));
+      if (!ses) return reply({ ok: false }, 404);
+      const off = parseInt(qs.get("offset") || "0");
+      const maxB = parseInt(qs.get("max_bytes") || "131072");
+      let start = Math.max(0, off), truncated = false;
+      if (off <= 0 && ses.hist.length > maxB) { start = ses.hist.length - maxB; truncated = true; }
+      const data = ses.hist.slice(start, start + maxB);
+      ses.out = "";
+      return reply({ ok: true, data, written: start + data.length, base_offset: 0, truncated });
     }
     if (path === "status") {
       const sessions = S.sessions.map(x => ({ sid: x.sid, label: x.label, host_id: x.hostId, key: x.key,
@@ -900,6 +951,76 @@ async function run(browser) {
   st = await page.evaluate(() => ({ screen: document.querySelector("#ssh-screen").textContent, chip: document.querySelector("#ssh-chip").textContent }));
   ok("reattach: 切回第一个会话能看到第一个终端", tb[0].active && !tb[1].active && tb[0].label === "a@h1" &&
     st.screen.includes("A-POLL-88") && /^ssh a@h1$/.test(st.chip), JSON.stringify(tb) + st.chip);
+
+  /* T26b 重挂重放:hist 是权威存量——刷新重挂后屏幕从 sync 窗口重建,布防命令的回显不再凭空消失;
+     out 里未消费的字节被 sync 覆盖并清空,不会经轮询二次渲染 */
+  for (let i = 0; i < 5; i++) {
+    const n = await page.evaluate(() => document.querySelectorAll("#ssh-tabs .ssh-tab").length);
+    if (!n) break;
+    await page.click("#ssh-tabs .ssh-tab:nth-child(1) .x");
+    await sleep(250);
+  }
+  await page.evaluate(() => {
+    const S = window.__ssh;
+    // 场景:第二个终端上布防命令 echo REARMED-77 已回显进 hist;页面死掉前最后一批字节(DUP-CHECK)还在 out 里没被消费
+    S.sessions = [
+      { sid: "s92-mock", label: "a@h1", hostId: "h-ops", key: "cm-a.sock", out: "A-POLL-99\r\n", hist: "hist-a\r\nA-POLL-99\r\n", writes: [], exited: null },
+      { sid: "s93-mock", label: "ops@web1", hostId: "h-ops", key: "cm-b.sock", out: "DUP-CHECK\r\n",
+        hist: "Welcome\r\nops@web1:~$ echo REARMED-77DUP-CHECK\r\n", writes: [], exited: null },
+    ];
+    OPS.armed.clear();
+    sshReattach();
+  });
+  await sleep(900);
+  st = await page.evaluate(() => {
+    const scr = document.querySelector("#ssh-screen").textContent;
+    return { screen: scr, dup: scr.split("DUP-CHECK").length - 1,
+      armed: OPS.armed.size, wmark: (sshSessions.find(s => s.sid === "s93-mock") || {}).wmark };
+  });
+  ok("replay: 重挂后布防命令的回显从 hist 还原", st.screen.includes("REARMED-77"), st.screen.slice(-120));
+  ok("replay: out 未消费字节由 sync 覆盖,不二次渲染", st.dup === 1, "出现 " + st.dup + " 次");
+  ok("replay: 重挂后 wmark 对齐服务端游标", typeof st.wmark === "number" && st.wmark > 0, JSON.stringify(st.wmark));
+
+  /* T26c ops 撤字与粘贴人审:Esc 取消 = ^U 清远端输入行;多行粘贴自带回车语义触发人审 */
+  await page.evaluate(() => {
+    const c = window.__ssh.cur();
+    OPS.armed.set(c.sid, { sid: c.sid, label: c.label, owner: curId });
+    opsRenderBar();
+  });
+  await page.click("#ssh-screen");   // 聚焦终端(无选区时焦点进 #ssh-hidden)
+  await page.keyboard.press("Escape");
+  await sleep(300);
+  st = await page.evaluate(() => ({ u: window.__ssh.writes.includes("\x15"), armed: OPS.armed.size }));
+  ok("ops: Esc 取消布防连远端输入行一起撤走(^U)", st.u && st.armed === 0, JSON.stringify(st));
+  await page.evaluate(() => {   // chip 单独取消:同样撤字
+    const c = window.__ssh.cur();
+    OPS.armed.set(c.sid, { sid: c.sid, label: c.label, owner: curId });
+    opsRenderBar();
+  });
+  await sleep(200);
+  await page.click("#ops-bar .queued-chip button");
+  await sleep(300);
+  st = await page.evaluate(() => ({ u: window.__ssh.writes.filter(w => w === "\x15").length, armed: OPS.armed.size }));
+  ok("ops: 提示条 x 单独取消也撤走远端命令", st.u >= 2 && st.armed === 0, JSON.stringify(st));
+  await page.evaluate(() => {   // 多行粘贴:布防中应触发人审([Ops] 引导消息),不再永卡「等待回车」
+    window.__chatBodies.length = 0;
+    const c = window.__ssh.cur();
+    OPS.armed.set(c.sid, { sid: c.sid, label: c.label, owner: curId });
+    opsRenderBar();
+  });
+  await page.click("#ssh-screen");
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData("text", "echo PASTE-A\necho PASTE-B\n");
+    $("ssh-hidden").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await sleep(1200);
+  st = await page.evaluate(() => ({
+    armed: OPS.armed.size, sent: $("ssh-hidden") && window.__ssh.writes.join("").includes("PASTE-A"),
+    opsMsg: (window.__chatBodies || []).some(b => JSON.stringify(b).includes("回车执行")),
+  }));
+  ok("ops: 多行粘贴触发回车人审([Ops] 引导消息发出)", st.armed === 0 && st.opsMsg, JSON.stringify(st));
+  ok("ops: 粘贴内容照常发进终端", st.sent);
 
   /* T27 保存过的密码:password 提示自动填一次,之后不再填 */
   await input.fill("/ssh ops");

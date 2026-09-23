@@ -245,7 +245,7 @@ function attachToolResult(card, toolMsg, ownerMsg) {
   };
 }
 
-function renderMessage(m) {
+function renderMessage(m, fast) {
   const wrap = document.createElement("div");
   if (m.role === "user") {
     wrap.className = "msg user";
@@ -296,11 +296,13 @@ function renderMessage(m) {
         const fn = c.function || {};
         const card = buildToolCard({ id: c.id, name: fn.name, arguments: safeParse(fn.arguments) });
         const meta = ((m._results || {})[c.id]);
-        const res = meta ? { role: "tool", tool_call_id: c.id, content: "", _meta: meta } : toolResultFor(c.id);
+        const res = meta ? { role: "tool", tool_call_id: c.id, content: "", _meta: meta }
+          : (fast && fast.toolIdx ? fast.toolIdx.get(c.id) : toolResultFor(c.id));   // 全量重渲用预建索引,免每卡线性扫
         if (res) attachToolResult(card, res, m);
         body.appendChild(card);
       }
-      const unanswered = m.tool_calls.filter(c => !((m._results || {})[c.id]) && !toolResultFor(c.id));
+      const answered = (id) => !!((m._results || {})[id]) || (fast && fast.toolIdx ? fast.toolIdx.has(id) : !!toolResultFor(id));   // 同 toolResultFor 语义,有索引不扫全表
+      const unanswered = m.tool_calls.filter(c => !answered(c.id));
       if (unanswered.length && !m.pending && !m.local) body.appendChild(permCardEl(m, unanswered));
     }
     if (m.usage) {
@@ -319,7 +321,8 @@ function renderMessage(m) {
       tools.querySelector(".copy").onclick = (e) => { navigator.clipboard.writeText(m.content); e.target.textContent = "Copied"; setTimeout(() => e.target.textContent = "Copy", 1200); };
       tools.querySelector(".fork").onclick = () => forkConversation(m);
       const rb = tools.querySelector(".retry");
-      if (isRetryable(m)) rb.onclick = () => retryTurn();
+      const retryable = fast ? (!m.local && fast.lastAsst === fast.idx && fast.lastUser >= 0 && fast.lastUser < fast.idx) : isRetryable(m);   // 语义同 isRetryable,索引在 renderMessages 一次算好
+      if (retryable) rb.onclick = () => retryTurn();
       else rb.remove();
     }
     appendMsgTime(tools, m.ts);
@@ -477,24 +480,113 @@ function permCardEl(m, unanswered) {
   return card;
 }
 
+/* 增量渲染缓存:全量重渲耗时随消息数线性放大,是长会话卡顿主因。同一会话且消息前缀按引用
+   完全一致时,保留前缀已渲染 DOM 只重渲尾部(追加/截断都走这条);前缀出现新对象(压缩整体
+   替换、分叉、重试截断后重发)自动退回全量。流式期间 40-stream 直接 append 的节点都在前缀
+   之后,重渲尾部时一并收编,不影响 live 节点重绑。
+   可保留的前缀止于倒数第二条用户消息:再往后的节点带回合内交互态(Retry 按钮随末位
+   assistant 变化、权限卡随工具回应到达而消失),必须随尾部一起重渲 */
+let _tlCache = null;   // { sid, msgs: 消息快照, cum: 每条消息渲染后 #messages 的子节点累计数 }
+/* 视口标记:消息真实进过视口才打 cvd(允许 content-visibility 跳过布局)。
+   contain-intrinsic-size 的 auto 只对「c-v 已生效且被真实布局过」的元素记忆高度,
+   直接全量启用会让从未布局过的消息按估高占位,滚动几何大幅漂移 —— 标记过的消息
+   离开视口即跳过布局/绘制,几何由记忆高度撑住,不漂移 */
+let _cvIO = null;
+function markCv(el) {
+  if (!_cvIO) {
+    _cvIO = new IntersectionObserver((ents) => {
+      for (const e of ents) if (e.isIntersecting) {
+        e.target.classList.add("cvd");
+        void e.target.offsetHeight;   // 标记即强排一次:此刻在视口内必然真布局,高度立刻被记忆 —— 防快速滚动下先跳过后记忆占位高
+        _cvIO.unobserve(e.target);
+      }
+    }, { root: $("chat") });
+  }
+  _cvIO.observe(el);
+}
+/* 高度固化:全量重建后(贴底读 scrollHeight 已强排一次完整布局)批量读出每条消息的真实
+   高度写成 contain-intrinsic-size 再打 cvd —— 视口外消息此后的重排被跳过,几何与真实布局
+   一致不漂移。读与写分两轮,避免逐条读写交替反复回流 */
+function seedCv() {
+  const box = $("messages");
+  const pairs = [];
+  for (const el of box.children) if (el.classList.contains("msg")) pairs.push([el, el.getBoundingClientRect().height]);
+  for (const [el, h] of pairs) { el.style.containIntrinsicSize = "auto " + h + "px"; el.classList.add("cvd"); }
+}
+/* 宽度变化(窗口缩放/拖 SSH 分栏)会重排换行高度:撤掉固化按新宽度重量一遍,
+   防冻结高度与真实高度脱节;只看宽度 —— 高度随消息增减是常态 */
+let _cvW = 0, _cvResizeT = null;
+new ResizeObserver((ents) => {
+  const w = ents[0].contentRect.width;
+  if (Math.abs(w - _cvW) < 1) return;
+  _cvW = w;
+  if (!_tlCache) return;
+  clearTimeout(_cvResizeT);
+  _cvResizeT = setTimeout(() => {
+    for (const el of $("messages").querySelectorAll(".msg.cvd")) { el.classList.remove("cvd"); el.style.containIntrinsicSize = ""; }
+    requestAnimationFrame(seedCv);
+  }, 250);
+}).observe($("messages"));
 function renderMessages() {
-  const s = curSession(); const box = $("messages"); box.innerHTML = "";
+  const s = curSession(); const box = $("messages");
   const empty = !s || !s.messages.length;
+  let keepN = 0, skipIdx = 0;   // 前缀保留的子节点数 / 前缀消息数
+  if (s && !empty && _tlCache && _tlCache.sid === s.id && !box.querySelector(".edit-box")) {
+    const old = _tlCache.msgs, cum = _tlCache.cum;
+    const n = Math.min(old.length, s.messages.length);
+    let k = 0, prevUser = -1, lastUser = -1;
+    for (let i = 0; i < n; i++) {
+      if (old[i] !== s.messages[i]) { k = i; break; }
+      k = i + 1;
+      if (s.messages[i].role === "user" && !s.messages[i].ops) { prevUser = lastUser; lastUser = i; }
+    }
+    const stable = prevUser >= 0 ? prevUser : (lastUser >= 0 ? lastUser : 0);   // 前缀安全边界(不含)
+    k = Math.min(k, stable);
+    if (k > 0 && cum[k - 1] != null && box.children.length >= cum[k - 1]) { keepN = cum[k - 1]; skipIdx = k; }
+  }
+  const incremental = keepN > 0;
+  if (!incremental) box.innerHTML = "";
   $("welcome").style.display = empty ? "" : "none";
   if (empty) renderWelcome();
-  if (s) for (const m of s.messages) {
-    if (m.ops) continue;   // ops 引导消息为系统注入,不进时间线
-    if (m.round >= 2) {  // 多轮工具回合的分隔条,重渲染后仍保留
-      const sep = document.createElement("div"); sep.className = "round-sep";
-      sep.textContent = `Round ${m.round}`;
-      box.appendChild(sep);
+  let userCount = 0;
+  if (s) {
+    /* 渲染索引一次建好(全量重渲原为 O(n²):每张工具卡/每条 assistant 都线性扫全表):
+       toolIdx 工具回应按 callId 建表(保留首个,同 toolResultFor 语义);
+       lastUser/lastAsst 与 isRetryable 同口径(跳过 local);
+       userCount 给问题导航计数(ops 注入消息不进时间线) */
+    const toolIdx = new Map();
+    let lastUser = -1, lastAsst = -1;
+    s.messages.forEach((m, i) => {
+      if (m.role === "tool" && m.tool_call_id) { if (!toolIdx.has(m.tool_call_id)) toolIdx.set(m.tool_call_id, m); }
+      else if (m.role === "user") { if (!m.ops) userCount++; if (!m.local) lastUser = i; }
+      else if (m.role === "assistant" && !m.local) lastAsst = i;
+    });
+    while (box.children.length > keepN) box.removeChild(box.lastChild);   // 截掉前缀之外的旧尾部(含流式直挂节点)
+    const frag = document.createDocumentFragment();   // 片段攒齐一次性挂载,免逐条插入
+    const cum = incremental ? _tlCache.cum.slice(0, skipIdx) : [];
+    const fresh = [];   // 本次新建的消息节点:挂载后统一交视口标记
+    for (let i = skipIdx; i < s.messages.length; i++) {
+      const m = s.messages[i];
+      if (!m.ops) {   // ops 引导消息为系统注入,不进时间线
+        if (m.round >= 2) {  // 多轮工具回合的分隔条,重渲染后仍保留
+          const sep = document.createElement("div"); sep.className = "round-sep";
+          sep.textContent = `Round ${m.round}`;
+          frag.appendChild(sep);
+        }
+        const wrap = renderMessage(m, { toolIdx, lastUser, lastAsst, idx: i });
+        frag.appendChild(wrap); fresh.push(wrap);
+      }
+      cum.push(keepN + frag.children.length);
     }
-    box.appendChild(renderMessage(m));
-  }
+    box.appendChild(frag);
+    for (const el of fresh) markCv(el);   // 前缀保留的节点先前已标记过,这里只补新尾部
+    _tlCache = s.messages.length ? { sid: s.id, msgs: s.messages.slice(), cum } : null;
+  } else _tlCache = null;
   if (s) $("cwd-input").value = s.cwd || "~";
   renderGoalChip(); renderCtxChip();
-  updateQnav();
+  updateQnav(s ? userCount : undefined);
   scrollBottom(true);
+  if (!incremental && s && s.messages.length) seedCv();   // 全量重建:首帧布局已真实完成,高度固化后旧消息离屏即跳过
 }
 function renderWelcome() {
   const box = $("sug-box"); if (!box) return;
@@ -580,13 +672,13 @@ $("chat").addEventListener("scroll", () => {
   const el = $("chat");
   stickBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   $("btn-scrollbottom").classList.toggle("show", !stickBottom);
-});
+}, { passive: true });   // 只读不拦截,滚动事件不必走可阻断路径
 function scrollBottom(force) {
   if (force || stickBottom) $("chat").scrollTop = $("chat").scrollHeight;
 }
 let qIdx = 0;
-function updateQnav() {
-  const users = [...$("messages").querySelectorAll(".msg.user")];
+function updateQnav(n) {
+  const users = typeof n === "number" ? { length: n } : $("messages").querySelectorAll(".msg.user");   // renderMessages 已数好条数可直接给,免再扫全列
   const nav = $("qnav");
   if (users.length < 2) { nav.classList.remove("show"); return; }
   nav.classList.add("show");

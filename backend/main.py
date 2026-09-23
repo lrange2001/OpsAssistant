@@ -20,6 +20,14 @@ def main():
     ap.add_argument("--port", type=int, default=8090, help="本服务监听端口(默认 8090)")
     ap.add_argument("--host", default="127.0.0.1", help="监听地址(默认 127.0.0.1)")
     args = ap.parse_args()
+    # 端口预绑定:先 bind+listen 再做目录准备/插件拉起,壳的端口探测与页面首连接
+    # 即刻成功(请求在 backlog 排队),这些准备工作与壳侧轮询、页面建连并行重叠,
+    # 缩短「点图标到能用」的关键路径。socket 接管见下方 ThreadingHTTPServer 构造。
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((args.host, args.port))
+    sock.listen(128)
     os.makedirs(datadir.SKILLS_DIR, exist_ok=True)
     os.makedirs(datadir.AGENTS_DIR, exist_ok=True)
     os.makedirs(datadir.MEMORY_DIR, exist_ok=True)
@@ -45,7 +53,11 @@ def main():
     threading.Thread(target=automation_scheduler, daemon=True).start()  # 常驻,新建任务即时生效
 
     cc = load_ccswitch_provider()
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    # bind_and_activate=False:跳过构造器里的重复 bind,接管上面预绑定的 socket
+    # (端口此刻已 listen,真正开始应答仍在本行之后,与原行为一致)
+    srv = ThreadingHTTPServer((args.host, args.port), Handler, bind_and_activate=False)
+    srv.socket.close()
+    srv.socket = sock
     print("=" * 60)
     print("  ForFreedom Assistant 已启动")
     print(f"  页面地址 : http://{args.host}:{args.port}")
