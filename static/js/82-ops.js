@@ -8,14 +8,23 @@ const OPS = { armed: new Map(), lastRead: null };   // armed: 终端 sid → {si
 /* 是否还有等待回车的布防(任意会话) */
 function opsAnyActive() { return OPS.armed.size > 0; }
 
-/* ops_type 工具结果落地:布防到 r.sid 标记的终端,归属 session(发起工具调用的会话) */
+/* ops_type / ops_broadcast 工具结果落地:布防到放置的终端(单发 r.sid、群发 r.targets 数组),归属 session(发起工具调用的会话) */
 function opsArmFromResult(r, session) {
-  if (!r || !r.ok || !r.sid || !session) return;   // 失败结果 / 无终端 / 无归属会话:不布防
-  OPS.armed.set(r.sid, { sid: r.sid, label: r.label || r.sid, owner: session.id });
+  if (!r || !r.ok || !session) return;   // 失败结果 / 无归属会话:不布防
+  const targets = (Array.isArray(r.targets) && r.targets.length)
+    ? r.targets : (r.sid ? [{ sid: r.sid, label: r.label }] : []);
+  if (!targets.length) return;
+  let first = null;
+  for (const t of targets) {
+    if (!t || !t.sid) continue;
+    OPS.armed.set(t.sid, { sid: t.sid, label: t.label || t.sid, owner: session.id });
+    first = first || t;
+  }
   opsPersist();
   opsRenderBar();
-  // 布防随动:命令放在哪台,回车人审就在哪台——面板自动切过去(仅当前会话的布防才动视图,后台会话不抢)
-  if (session.id === curId) sshSwitchToSid(r.sid);
+  // 布防随动:命令放在哪台,回车人审就在哪台——面板自动切过去(群发切第一台,其余逐台回车各自触发;
+  // 仅当前会话的布防才动视图,后台会话不抢)
+  if (session.id === curId && first) sshSwitchToSid(first.sid);
 }
 
 /* 终端收到回车键(80-ssh 在键盘路径调用;sdk 自动填密码等写入不走这里,天然不误触发) */

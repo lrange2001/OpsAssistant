@@ -9,6 +9,7 @@ const TOOL_LABEL = {
   edit_file: "Edit File", list_dir: "List Dir", grep: "Grep", glob: "Glob",
   todo_write: "Todo", task: "Task", web_fetch: "Web Fetch", skill: "Skill",
   ops_type: "终端输入", ops_read: "终端读取",
+  ops_broadcast: "终端群发", ops_facts: "主机画像",
 };
 
 /* WebKit(WKWebView/Safari)事件顺序怪癖:确认拼音的回车是 compositionend → keydown,

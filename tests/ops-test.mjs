@@ -630,6 +630,34 @@ async function uiTests() {
     chk(!/终端已断开/.test(card.text), "alive=true 不应出现断开标注");
   });
 
+  /* OP-9 群发布防 */
+  await t(page, "OP-9 ops_broadcast:一次布防多台终端,状态条多 chip 可分别取消", async () => {
+    const alive0 = await page.evaluate(() => sshSessions.filter(x => x.alive).length);
+    if (alive0 < 2) await uiConnect(page, input, "web", "root@10.0.0.9");
+    ownerId = await page.evaluate(() => curId);
+    const st = await page.evaluate((owner) => {
+      OPS.armed.clear(); opsPersist(); opsRenderBar();   // 清干净历史布防,断言只看本轮群发
+      const alive = sshSessions.filter(x => x.alive);
+      const targets = alive.slice(0, 2).map(x => ({ sid: x.sid, label: x.label }));
+      opsArmFromResult({ ok: true, command: "uptime", targets }, sessions.find(s => s.id === owner) || curSession());
+      return targets;
+    }, ownerId);
+    chk(st.length === 2, "前置:两台在线终端作为群发目标,实际: " + JSON.stringify(st));
+    const bar = await opsBarState(page);
+    const txs = bar.chips.map(c => c.tx).join("|");
+    chk(bar.shown && bar.chips.length === 2, "ops-bar 应可见且恰两个 chip,实际: " + JSON.stringify(bar));
+    chk(st.every(t => txs.includes(t.label)), "两个 chip 各带自己终端的 label,实际: " + txs);
+    chk(bar.armed.length === 2 && bar.armed.every(x => x.owner === ownerId),
+      "运行时布防两台且归属当前会话,实际: " + JSON.stringify(bar.armed));
+    await page.evaluate((sid) => { OPS.armed.delete(sid); opsPersist(); opsRenderBar(); }, st[0].sid);
+    const bar2 = await opsBarState(page);
+    chk(bar2.chips.length === 1 && bar2.chips[0].tx.includes(st[1].label),
+      "取消一台后应剩一个 chip,实际: " + JSON.stringify(bar2.chips));
+    await page.evaluate(() => { OPS.armed.clear(); opsPersist(); opsRenderBar(); });
+    const bar3 = await opsBarState(page);
+    chk(!bar3.shown && bar3.chips.length === 0, "全部取消后 ops-bar 应隐藏,实际: " + JSON.stringify(bar3));
+  });
+
   await page.close();
   await ctx.close();
   await browser.close().catch(() => {});
@@ -653,8 +681,8 @@ const PY = [
   "import json, sys, time",
   "sys.path.insert(0, '.')",
   "from backend.term import TERMS",
-  "from backend.ops import (OPS_CURSORS, _ops_fence, check_ops_command, ops_plan_gate,",
-  "                         ops_register, tool_ops_read, tool_ops_type)",
+  "from backend.ops import (OPS_CURSORS, _facts_parse, _ops_fence, check_ops_command, ops_plan_gate,",
+  "                         ops_register, tool_ops_broadcast, tool_ops_read, tool_ops_type)",
   "from backend.tools_builtin import TOOL_DEFS, TOOL_IMPL",
   "",
   "def emit(name, ok, detail=''):",
@@ -846,6 +874,79 @@ const PY = [
   "for k in ('s-d9a', 's-d9b', 's-d9c', 's-d9d'):",
   "    SSHS.sessions.pop(k, None)",
   "OPS_CURSORS.pop('s-d9b', None)",
+  "",
+  "# D10 follow 语义:盯输出直到命中 expect 或超时",
+  "sidF = TERMS.create(None, 100, 30)",
+  "sesF = TERMS.get(sidF)",
+  "time.sleep(0.8)",
+  "tool_ops_type({'command': 'echo FOLLOW-HIT-7; sleep 1.5; echo FOLLOW-TAIL-9', 'terminal': sidF})",
+  "sesF.write('\\r')",
+  "rf = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': 'FOLLOW-HIT-7', 'timeout_s': 8})",
+  "emit('D10: follow 命中即收(matched=true 且含命中行)',",
+  "     rf.get('ok') is True and rf.get('matched') is True and 'FOLLOW-HIT-7' in (rf.get('text') or ''), rf)",
+  "tool_ops_type({'command': 'echo PLAIN-1', 'terminal': sidF})",
+  "sesF.write('\\r')",
+  "time.sleep(0.5)",
+  "rg = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': 'NEVER-SHOWS', 'timeout_s': 1})",
+  "emit('D10: follow 未命中超时(matched=false 且 timed_out=true,文本带回显)',",
+  "     rg.get('matched') is False and rg.get('timed_out') is True and 'PLAIN-1' in (rg.get('text') or ''), rg)",
+  "r0 = tool_ops_read({'terminal': sidF, 'wait': 'follow'})",
+  "emit('D10: follow 缺 expect 拒绝', r0.get('ok') is False and 'expect' in (r0.get('error') or ''), r0)",
+  "rb0 = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': '[unclosed', 'timeout_s': 1})",
+  "emit('D10: expect 非法正则拒绝', rb0.get('ok') is False and '正则' in (rb0.get('error') or ''), rb0)",
+  "TERMS.dispose(sidF)",
+  "",
+  "# D11 ops_broadcast 群发:同机去重、逐台写入、写前游标、断开跳过、gate 拦截",
+  "bb1 = Stub('s-b1', 'webA', '10.3.1.1', 22, 'root')",
+  "bb2 = Stub('s-b2', 'webB', '10.3.1.2', 22, 'root')",
+  "bb3 = Stub('s-b3', 'webC', '10.3.1.1', 22, 'app')",
+  "SSHS.sessions.update({'s-b1': bb1, 's-b2': bb2, 's-b3': bb3})",
+  "rbc = tool_ops_broadcast({'command': 'uptime', 'terminals': ['webA', 'webB', '10.3.1.1:22']})",
+  "sidsB = {t.get('sid') for t in (rbc.get('targets') or [])}",
+  "emit('D11: 广播命中两台且写入命令(同机分组去重,webC 不放)',",
+  "     rbc.get('ok') is True and sidsB == {'s-b1', 's-b2'} and bb1.typed == 'uptime' and bb2.typed == 'uptime' and bb3.typed is None,",
+  "     (rbc, bb3.typed))",
+  "emit('D11: 各台写前快照游标已落', OPS_CURSORS.get('s-b1') == 0 and OPS_CURSORS.get('s-b2') == 0,",
+  "     (OPS_CURSORS.get('s-b1'), OPS_CURSORS.get('s-b2')))",
+  "bb2.exited = 1",
+  "rbd = tool_ops_broadcast({'command': 'date', 'terminals': ['webA', 'webB']})",
+  "emit('D11: 断开目标跳过并说明(skipped),其余照放',",
+  "     rbd.get('ok') is True and {t.get('sid') for t in rbd.get('targets')} == {'s-b1'} and bool(rbd.get('skipped')), rbd)",
+  "rbe = tool_ops_broadcast({'command': 'date', 'terminals': ['no-such-host']})",
+  "emit('D11: 全部目标不可解析则失败', rbe.get('ok') is False and 'no-such-host' in (rbe.get('error') or ''), rbe)",
+  "emit('D11: gate 拦已放置后的广播', isinstance(ops_plan_gate({'command': 'x', 'terminals': ['webA']}, {'s-b1'}), str), '')",
+  "emit('D11: gate 拦缺 terminals', isinstance(ops_plan_gate({'command': 'x'}, set()), str), '')",
+  "emit('D11: gate 放行合法广播', ops_plan_gate({'command': 'x', 'terminals': ['webA']}, set()) is None, '')",
+  "for k in ('s-b1', 's-b2', 's-b3'):",
+  "    SSHS.sessions.pop(k, None)",
+  "for k in ('s-b1', 's-b2'):",
+  "    OPS_CURSORS.pop(k, None)",
+  "",
+  "# D12 画像解析(_facts_parse 纯函数:固定探测输出 → 紧凑画像行)",
+  "sample = '\\n'.join(['#f:os', 'PRETTY_NAME=\"Ubuntu 22.04.3 LTS\"', 'Linux 5.15.0-91-generic',",
+  "                    '#f:up', ' 14:22:01 up 23 days, load average: 0.12',",
+  "                    '#f:disk', '/dev/vda1 39G 31G 6.1G 84% /',",
+  "                    '#f:mem', '3852 MB total / 3110 MB used',",
+  "                    '#f:svc', 'nginx.service loaded failed failed nginx', 'degraded',",
+  "                    '#f:proc', '9.8 18.2 mysqld', '1.2 2.0 sshd', '#f:zomb', '3',",
+  "                    '#f:docker', 'web-1 | Up 3 days',",
+  "                    '#f:kube', 'node1=Ready node2=NotReady ', 'CrashLoopBackOff x2: api-7f9c web-9xk',",
+  "                    '#f:port', '22 80 443 '])",
+  "fl = _facts_parse(sample)",
+  "emit('D12: 解析出系统/磁盘/服务/端口/内存',",
+  "     any('Ubuntu 22.04.3 LTS' in x and '5.15.0' in x for x in fl) and any('84%' in x for x in fl)",
+  "     and any('degraded' in x and 'nginx.service' in x for x in fl) and any('22 80 443' in x for x in fl)",
+  "     and any('3852 MB' in x for x in fl), fl)",
+  "emit('D12: 空输出解析为空列表(不臆造)', _facts_parse('') == [] and _facts_parse(None) == [], '')",
+  "fl2 = _facts_parse('\\n'.join(['#f:os', 'Darwin']))",
+  "emit('D12: 段缺失时只出系统行', len(fl2) == 1 and fl2[0].startswith('系统:'), fl2)",
+  "fl3 = _facts_parse('\\n'.join(['#f:os', 'Darwin', '#f:zomb', '0']))",
+  "emit('D12: 进程TOP与僵尸数(ps 补 systemd 盲区),零僵尸不出行',",
+  "     any(x.startswith('进程TOP:') and 'mysqld' in x and '9.8' in x for x in fl)",
+  "     and any(x == '僵尸进程: 3' for x in fl) and not any(x.startswith('僵尸') for x in fl3), fl)",
+  "emit('D12: 容器与 k8s(docker ps / kubectl,装了才采)',",
+  "     any(x.startswith('容器:') and 'web-1' in x for x in fl) and any(x.startswith('k8s:') and 'NotReady' in x and 'CrashLoopBackOff' in x for x in fl),",
+  "     fl)",
   "print('PYDONE', flush=True)",
 ].join("\n");
 

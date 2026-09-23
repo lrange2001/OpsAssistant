@@ -343,10 +343,47 @@ async function autoRuns(aid, itemEl) {
   try {
     const j = await (await fetch("/api/automation-runs?id=" + encodeURIComponent(aid))).json();
     const runs = j.runs || [];
-    box.textContent = runs.length
-      ? runs.map(r => `--- ${fmtDT(r.ts)} (${r.rounds} rounds) ---\n${r.final || "(无输出)"}`).join("\n\n")
-      : "(还没有运行记录)";
+    box.textContent = "";
+    if (!runs.length) { box.textContent = "(还没有运行记录)"; return; }
+    for (const r of runs) {
+      const one = document.createElement("div");
+      one.style.cssText = "margin-bottom:8px";
+      const hd = document.createElement("div");
+      hd.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap";
+      const t = document.createElement("span");
+      t.style.cssText = "color:var(--muted);font-size:11.5px";
+      t.textContent = `--- ${fmtDT(r.ts)} (${r.rounds} rounds) ---`;
+      hd.appendChild(t);
+      const b = document.createElement("button");
+      b.className = "mini-btn"; b.style.margin = "0"; b.textContent = "转 ops 处理";
+      b.title = "新建 ops 会话并预填本次运行结果,在在线终端上定位处理该问题";
+      b.onclick = () => autoToOps(r.title || aid, r.ts, r.final || "");
+      hd.appendChild(b);
+      one.appendChild(hd);
+      const body = document.createElement("div");
+      body.style.cssText = "white-space:pre-wrap;word-break:break-word;font-size:12px;margin-top:2px";
+      body.textContent = r.final || "(无输出)";
+      one.appendChild(body);
+      box.appendChild(one);
+    }
   } catch (e) { box.textContent = "加载失败: " + e.message; }
+}
+
+/* 巡检结果直接转 ops 处理:新建会话、进 ops 模式、把本次运行结果预填输入框(用户过目后发送);
+   无在线 SSH 终端时不建会话(setMode 也会拦,这里先给更明确的指引) */
+function autoToOps(title, ts, final) {
+  if (!(typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive))) {
+    toast("先 /ssh 连上目标服务器,再转 ops 处理", "warn");
+    return;
+  }
+  closeDrawer();
+  newSession(true, { force: true });
+  setMode("ops", true);
+  const inp = $("input");
+  inp.value = `巡检任务「${title}」${fmtDT(ts)} 的运行结果如下。请先用 ops_facts 采集涉及主机的画像,再基于在线终端定位问题原因,一步步放置命令处理:\n\n${(final || "").slice(0, 2000)}`;
+  updateSendBtn(); updatePlaceholder();
+  inp.focus();
+  toast("已创建 ops 会话并预填巡检结果,过目后发送");
 }
 async function saveAutomation() {
   const unit = document.querySelector("#au-units label.on")?.dataset.u || "daily";

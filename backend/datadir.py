@@ -15,7 +15,7 @@ POINTER_PATH = os.path.join(DATA_STATE_DIR, "datadir.txt")
 DEFAULT_DATA_DIR = os.path.expanduser("~/ForFreedom")
 # 数据项清单 = 本文件实际引用的 DATA_DIR 下的文件/目录;换位置/迁移按此逐项搬,指针文件不算数据项
 DATA_ITEMS = ("config.json", "skills", "agents", "memory", "commands",
-              "checkpoints", "automations", "usage.jsonl")
+              "checkpoints", "automations", "usage.jsonl", "facts")
 
 
 def _read_pointer():
@@ -102,7 +102,7 @@ SKILLS_DIR = os.path.join(DATA_DIR, "skills")
 def _rebind_data_dir(new_dir):
     """换位置后重指向全部数据路径全局量(各函数都在调用时读这些全局量,无常态句柄)"""
     global DATA_DIR, CONFIG_PATH, SKILLS_DIR, CHECKPOINT_DIR, USAGE_PATH, AUTOMATION_DIR
-    global AGENTS_DIR, MEMORY_DIR, COMMANDS_DIR
+    global AGENTS_DIR, MEMORY_DIR, COMMANDS_DIR, FACTS_DIR
     DATA_DIR = new_dir
     CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
     SKILLS_DIR = os.path.join(DATA_DIR, "skills")
@@ -112,6 +112,7 @@ def _rebind_data_dir(new_dir):
     AGENTS_DIR = os.path.join(DATA_DIR, "agents")
     MEMORY_DIR = os.path.join(DATA_DIR, "memory")
     COMMANDS_DIR = os.path.join(DATA_DIR, "commands")
+    FACTS_DIR = os.path.join(DATA_DIR, "facts")
 
 CHECKPOINT_DIR = os.path.join(DATA_DIR, "checkpoints")
 USAGE_PATH = os.path.join(DATA_DIR, "usage.jsonl")
@@ -120,5 +121,6 @@ AUTOMATION_DIR = os.path.join(DATA_DIR, "automations")
 AGENTS_DIR = os.path.join(DATA_DIR, "agents")
 MEMORY_DIR = os.path.join(DATA_DIR, "memory")
 COMMANDS_DIR = os.path.join(DATA_DIR, "commands")
+FACTS_DIR = os.path.join(DATA_DIR, "facts")   # ops 主机画像缓存(ops_facts 工具)
 
 

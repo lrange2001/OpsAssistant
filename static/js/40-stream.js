@@ -276,7 +276,7 @@ async function runTurn({ executePending = false, session = null } = {}) {
             scrollBottom();
           }
           (live._results = live._results || {})[ev.id] = ev.result;  // DOM 缺失也照记,重渲染/中断后不丢
-          if (ev.name === "ops_type" && ev.result && ev.result.ok) opsArmFromResult(ev.result, s);   // ops:回车布防到 r.sid 终端(归属本回合会话)
+          if ((ev.name === "ops_type" || ev.name === "ops_broadcast") && ev.result && ev.result.ok) opsArmFromResult(ev.result, s);   // ops:回车布防到放置的终端(单发 sid / 群发 targets,归属本回合会话)
         } else if (ev.type === "checkpoint") {
           // agent 修改文件前自动落的检查点
           s.checkpoints = [{ id: ev.id, createdAt: ev.createdAt, label: ev.label, files: ev.files }, ...(s.checkpoints || [])].slice(0, 50);

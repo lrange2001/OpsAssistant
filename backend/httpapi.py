@@ -28,7 +28,7 @@ from .ssh import SSHS, _bad_text, _ssh_spec_from_body, api_ssh_groups_save, api_
 from .term import TERMS
 from .textutil import _trunc, dir_hints, fix_arguments, strip_emoji
 from .tools_builtin import TOOL_DEFS, TOOL_IMPL, tool_list_dir, tool_read_file
-from .ops import build_ops_system_block, ops_plan_gate, ops_register, ops_result_text
+from .ops import OPS_TOOL_NAMES, build_ops_system_block, ops_plan_gate, ops_register, ops_result_text
 from .usage import log_usage, usage_summary
 
 # ops 模式工具注册:模块加载即挂入全局工具表(与 tools_extra 的注册同相位)
@@ -739,9 +739,10 @@ class Handler(BaseHTTPRequestHandler):
         if not tools_enabled:
             all_tools = []
         if mode == "ops":
-            # ops 双工具是模式本体,不随「工具」开关关停(开关只管常规工具与 MCP),且其余工具不进本轮工具表;
-            # 工具表为空时模型只能照系统块"口述"调用,命令永远进不了终端
-            all_tools = [t for t in TOOL_DEFS if t["function"]["name"] in ("ops_type", "ops_read")]
+            # ops 四工具是模式本体,不随「工具」开关关停(开关只管常规工具与 MCP),且其余工具不进本轮工具表;
+            # 唯一例外:skill(排障手册)随开关放行——开关关着时连技能也不进表;工具表为空时模型只能照系统块"口述"调用
+            names = set(OPS_TOOL_NAMES) | ({"skill"} if tools_enabled else set())
+            all_tools = [t for t in TOOL_DEFS if t["function"]["name"] in names]
 
         append_messages = []
         ops_armed_sids = set()  # ops 模式:本轮已放置命令的终端 sid(一轮一条,armed 即强制收轮)
@@ -807,8 +808,10 @@ class Handler(BaseHTTPRequestHandler):
                 decision = permission_decision(mode, name, args, config.CONFIG, session_cwd)
                 if not auto_approve:
                     decision = "deny" if decision == "deny" else "ask"
-                if name in ("ops_type", "ops_read"):
-                    decision = "auto"  # ops 工具只打字不执行,永不出审批卡,回车即人审
+                if name in OPS_TOOL_NAMES:
+                    decision = "auto"  # ops 工具只打字/只读探测,永不出审批卡,回车即人审
+                elif mode == "ops" and name == "skill":
+                    decision = "auto"  # ops 模式下的技能加载是纯读文本,不打审批卡打断回车循环
                 plan.append({"call": call, "name": name, "args": args,
                              "decision": decision, "risk": risk_level(name, args)})
             return plan
@@ -833,8 +836,8 @@ class Handler(BaseHTTPRequestHandler):
                     r = {"ok": False, "error": p["err"]}
                 elif p.get("decision") == "deny":
                     r = {"ok": False, "status": "denied", "error": "该操作被拒绝规则禁止(可在 设置 > 权限 调整)"}
-                elif name == "ops_type":
-                    # ops 一轮一条:本轮已放置过(或静态校验不过)在此拦下,等输出再决定下一步
+                elif name in ("ops_type", "ops_broadcast"):
+                    # ops 一轮一批:本轮已放置过(或静态校验不过)在此拦下,等输出再决定下一步
                     gate_err = ops_plan_gate(p["args"], ops_armed_sids)
                     if gate_err:
                         r = {"ok": False, "error": gate_err}
@@ -843,14 +846,18 @@ class Handler(BaseHTTPRequestHandler):
                             r = dispatch_with_progress(call, name, p["args"])
                         except Exception as e:
                             r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-                        if r.get("ok") and r.get("sid"):
-                            ops_armed_sids.add(r["sid"])
+                    if r.get("ok"):
+                        # 广播回 targets 数组、单发回 sid:放进的本轮都记入 armed(强制收轮按非空判定)
+                        sids = [r["sid"]] if r.get("sid") else [t.get("sid") for t in (r.get("targets") or [])]
+                        for sid_ in sids:
+                            if sid_:
+                                ops_armed_sids.add(sid_)
                 else:
                     try:
                         r = dispatch_with_progress(call, name, p["args"])
                     except Exception as e:
                         r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-                content = ops_result_text(name, r) if name in ("ops_type", "ops_read") else result_to_model_text(name, r)
+                content = ops_result_text(name, r) if name in OPS_TOOL_NAMES else result_to_model_text(name, r)
                 emit({"type": "tool_result", "id": call.get("id"), "name": name, "result": r})
                 tool_msgs.append({"role": "tool", "tool_call_id": call.get("id"), "content": content, "_meta": r})
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})

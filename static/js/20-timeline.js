@@ -50,7 +50,13 @@ function buildToolCard(call, { pending = false } = {}) {
     const h = document.createElement("div"); h.className = "hint-text"; h.textContent = "已打入终端输入行,未回车 —— 在终端按 Enter 执行后自动分析";
     card.appendChild(h);
   }
-  else if (call.name === "ops_read") cmdLine(`read ${a.terminal || "-"} · ${a.wait || "wait"}`);
+  else if (call.name === "ops_read") cmdLine(`read ${a.terminal || "-"} · ${a.wait || "wait"}${a.expect ? " / " + a.expect : ""}`);
+  else if (call.name === "ops_broadcast" && a.command != null) {
+    cmdLine(`[${(a.terminals || []).join(", ") || "-"}] ${a.command}`);
+    const h = document.createElement("div"); h.className = "hint-text"; h.textContent = "已群发到多台终端输入行,未回车 —— 逐台按 Enter 执行后逐台读取对比";
+    card.appendChild(h);
+  }
+  else if (call.name === "ops_facts") cmdLine(`facts ${a.terminal || "-"}${a.refresh ? " · refresh" : ""}`);
   else if (call.name === "write_file" && a.path != null) cmdLine(`write ${a.path} (${(a.content || "").length} chars)`);
   else if (call.name === "edit_file" && a.path != null) cmdLine(`edit ${a.path}`);
   else if (call.name === "read_file" && a.path) cmdLine(`read ${a.path}`);
