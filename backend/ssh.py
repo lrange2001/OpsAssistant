@@ -46,7 +46,11 @@ def _ssh_common_opts(spec, cpath):
             "-o", "ControlPath=%s" % cpath,
             "-o", "ControlPersist=%dm" % int(spec.get("persist_min") or 15),
             "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
-            "-o", "StrictHostKeyChecking=accept-new"]
+            "-o", "StrictHostKeyChecking=accept-new",
+            # 老服务器兼容(仅提供 ssh-rsa 主机密钥的 CentOS 6 时代 sshd):+ 前缀把 ssh-rsa
+            # 追加到候选表末位兜底——现代服务器算法优先级不变、不降级,老机器免遭握手直接失败
+            "-o", "HostKeyAlgorithms=+ssh-rsa",
+            "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa"]
     if spec.get("key_path"):
         opts += ["-i", spec["key_path"]]
     if spec.get("jump"):
