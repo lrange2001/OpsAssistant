@@ -6,7 +6,7 @@ const SLASH = [
   { name: "resume", aliases: ["continue"], args: "[id]", desc: "Browse saved sessions" },
   { name: "compact", args: "[instructions]", desc: "Compact this conversation (summary + recent turns)" },
   { name: "init", args: "[notes]", desc: "Create or update workspace AGENTS.md" },
-  { name: "mode", args: "[plan|build|edit|yolo]", desc: "Show or switch permission mode" },
+  { name: "mode", args: "[plan|build|edit|yolo|ops]", desc: "Show or switch permission mode" },
   { name: "goal", args: "[pause|resume|clear|replace|<text>]", desc: "Show or set the session goal" },
   { name: "rewind", args: "[latest|<id>|status]", desc: "Restore files from a checkpoint" },
   { name: "fork", args: "[latest|<id>]", desc: "Fork this conversation (optionally from a checkpoint)" },
@@ -120,9 +120,14 @@ async function handleSlashCommand(raw) {
         localMsg(`Current mode: **${curMode()}** — ${MODE_INFO[curMode()].desc}\n\n` +
           MODE_ORDER.map(m => `- \`${m}\` — ${MODE_INFO[m].desc}`).join("\n") +
           "\n\nSwitch with `/mode <name>` or Ctrl+Shift+M.");
-      } else if (MODE_INFO[rest]) {
-        setMode(rest);
-      } else localMsg(`Unknown mode \`${rest}\`. Options: plan, build, edit, yolo.`);
+      } else {
+        // 只取首词当模式名;余文(如「/mode ops 看下磁盘」的任务部分)在切换成功后当任务发出
+        const first = rest.split(/\s+/)[0];
+        const extra = rest.slice(first.length).trim();
+        if (MODE_INFO[first]) {
+          if (setMode(first) && extra) sendText(extra, true);
+        } else localMsg(`Unknown mode \`${first}\`. Options: plan, build, edit, yolo, ops.`);
+      }
       break;
     }
     case "goal": {
@@ -699,7 +704,7 @@ async function sendText(text, skipQueue = false, skills = null, quotes = null, o
   }
   const s = tgt || curSession(); if (!s) return;
   if (!tgt) clearDraft();
-  if (t) pushPromptHistory(t);
+  if (t && !(opts && opts.ops)) pushPromptHistory(t);   // ops 引导消息不进 ↑ 历史
   // 引用 chip(ZCode context chips):序列化为消息开头的引用块,类型标记来源
   let out = t;
   if (qs.length) {
@@ -710,7 +715,7 @@ async function sendText(text, skipQueue = false, skills = null, quotes = null, o
   if (sk.length) {
     out = sk.map(x => "$" + x).join(" ") + (out ? " " + out : " 请按已激活技能的说明完成任务。");
   }
-  s.messages.push({ role: "user", content: out, ts: Date.now(), ...(imgs.length ? { images: imgs } : {}) });
+  s.messages.push({ role: "user", content: out, ts: Date.now(), ops: !!(opts && opts.ops), ...(imgs.length ? { images: imgs } : {}) });
   if (!tgt) {   // 目标会话发送:当前 composer 的草稿/附件/技能/引用一概不动
     attachments = []; renderAttach();
     activeSkills = []; renderSkillBar();
@@ -718,7 +723,7 @@ async function sendText(text, skipQueue = false, skills = null, quotes = null, o
     $("input").value = ""; $("input").style.height = "auto";
     histBrowse = -1;
   }
-  if (s.title === "新对话") { s.title = (t || sk.join(" ")).slice(0, 24); renderSessionList(); }
+  if (s.title === "新对话" && !(opts && opts.ops)) { s.title = (t || sk.join(" ")).slice(0, 24); renderSessionList(); }
   persist();
   await runTurn(tgt ? { session: tgt } : undefined);
 }

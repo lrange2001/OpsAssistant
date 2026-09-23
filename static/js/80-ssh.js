@@ -4,7 +4,18 @@
 // 终端与聊天会话 1:1 配对:对象带 chat(配对聊天会话 id);标签条全局渲染所有终端,active = 配对当前会话;
 // 点标签 = 终端和聊天区一起切到它配对的会话;关终端只解绑(会话保留可再绑)
 let sshSessions = [];        // [{sid,label,hostId,key,chat,alive,pw,pwUsed,state:{buf,alt,screen},timer,pollBusy,lastKey}]
-function sshCur() { return sshSessions.find(s => s.chat === curId) || null; }   // 当前会话配对的终端(1:1,至多一个)
+// ops 视图覆盖:ops 会话驱动全部在线终端,「看哪台终端」与「哪个会话」解耦——点标签只切视图、布防自动跟随;
+// 切会话/切模式即丢弃。非 ops 恒 null,sshActive() 与 sshCur() 完全等价(1:1 配对语义不变)
+let sshViewSid = null;
+let sshFollowHost = null;   // ops 重连跟随:Reconnect 发起的主机 id,一次性标记——连接完成后视图切到新终端(重连换 sid,旧覆盖已随旧终端关闭失效)
+function sshCur() { return sshSessions.find(s => s.chat === curId) || null; }   // 当前会话配对的终端(1:1,至多一个;仅配对语义:/vvv、门控、连接配对都用它)
+function sshActive() {   // 面板实际显示与接收键盘的终端:ops 有视图覆盖则显示覆盖终端(已移除的自动回落),否则= 配对终端
+  if (sshViewSid) {
+    const v = sshSessions.find(s => s.sid === sshViewSid);
+    if (v) return v;
+  }
+  return sshCur();
+}
 function sshChatTabs() { return sshSessions.filter(s => s.chat === curId); }   // 命令门控用(1:1 下即 [sshCur()] )
 // 配对元数据:以运行时数组为准重建各聊天会话的 sshTabs(1:1 下至多一项)并随 persist() 落盘(无变动不写)
 function sshPersistMeta() {
@@ -31,6 +42,7 @@ function sshDisposeChat(deadS) {
     if (i < 0) continue;
     if (sshSessions[i].timer) { clearTimeout(sshSessions[i].timer); sshSessions[i].timer = null; }
     sshSessions.splice(i, 1);
+    if (sshViewSid === t.sid) sshViewSid = null;   // 释放的正是视图终端:覆盖失效回落
   }
   deadS.sshTabs = [];
 }
@@ -43,7 +55,7 @@ async function sshPost(path, body) {
 function sshCols() { const el = $("ssh-screen"); return Math.max(20, Math.floor(((el ? el.clientWidth : 820) - 20) / termCharW(el))); }   // 实测字符宽、扣掉 padding,与 termCols 同一套
 function sshRows() { const el = $("ssh-screen"); const lh = el ? parseFloat(getComputedStyle(el).lineHeight) || 17 : 17; return Math.max(6, Math.floor(((el ? el.clientHeight : 320) - 20) / lh)); }
 function sshBadge() {
-  const el = $("ssh-chip"); const c = sshCur();
+  const el = $("ssh-chip"); const c = sshActive();   // 徽章跟随面板实际显示的终端(ops 视图覆盖时与面板一致)
   if (!c) { el.style.display = "none"; return; }
   el.style.display = "";
   el.textContent = "ssh " + c.label + (c.alive ? "" : " (off)");
@@ -56,7 +68,7 @@ function renderSshTabs() {
   wrap.textContent = "";
   sshSessions.forEach((ses, i) => {
     const t = document.createElement("div");
-    t.className = "ssh-tab" + (ses.chat === curId ? " active" : "");
+    t.className = "ssh-tab" + (ses === sshActive() ? " active" : "");
     const dot = document.createElement("span");
     dot.className = "ssh-dot" + (ses.alive ? " ok" : "");
     const lb = document.createElement("span");
@@ -66,7 +78,10 @@ function renderSshTabs() {
     x.onclick = (ev) => { ev.stopPropagation(); sshCloseSession(i); };
     t.append(dot, lb, x);
     t.onclick = () => sshSwitch(i);
-    t.title = ses.label + (ses.alive ? "" : " (off)") + "\n" + ses.sid + "\nClick to switch to this terminal's conversation\n/vvv /download /upload act on the current tab";
+    t.title = ses.label + (ses.alive ? "" : " (off)") + "\n" + ses.sid + "\n" +
+      (curMode() === "ops"
+        ? "Click to view this terminal (the ops conversation keeps driving all terminals)"
+        : "Click to switch to this terminal's conversation\n/vvv /download /upload act on the current tab");
     wrap.appendChild(t);
   });
   const plus = document.createElement("div");
@@ -74,7 +89,7 @@ function renderSshTabs() {
   plus.textContent = "+";
   plus.title = "Open another terminal (paired with a new conversation) on the current host";
   plus.onclick = () => {
-    const c = sshCur();
+    const c = sshActive();
     if (c && c.hostId) sshConnect(c.hostId);   // 同主机新终端 = 新会话:复用窗口内免二次认证
     else $("ssh-host-sel").focus();
   };
@@ -82,11 +97,43 @@ function renderSshTabs() {
 }
 function sshSwitch(i) {
   const ses = sshSessions[i];
-  if (!ses || ses.chat === curId) return;
+  if (!ses) return;
+  if (curMode() === "ops") {
+    // ops:点标签只切终端视图(面板看哪台),聊天区留在 ops 会话——ops 会话驱动全部终端,不为看一眼终端而切走会话
+    sshViewSid = ses.sid;
+    renderSshTabs();
+    sshOpenPanel();
+    sshApply();
+    sshBadge();
+    sshFit();
+    $("ssh-hidden").focus();
+    return;
+  }
+  if (ses.chat === curId) return;
   if (!sessions.some(x => x.id === ses.chat)) return;   // 配对会话已不存在(删除会话会连带释放终端,理论到不了)
   switchSession(ses.chat);   // 终端和聊天区一起切(switchSession 末尾 sshSyncChat 激活配对终端)
   sshOpenPanel();
   $("ssh-hidden").focus();
+}
+/* ops 布防随动:面板切到布防终端(命令放在哪台,回车人审就在哪台,自动跟到眼前);skipFocus 供启动还原用——
+   开局抢焦点进终端会把用户的打字拼进布防命令的输入行,只切视图不动焦点 */
+function sshSwitchToSid(sid, skipFocus) {
+  if (curMode() !== "ops") return;   // 仅 ops 可设视图覆盖(非 ops 恒 null 的不变量):切走模式后残留的布防在刷新还原时不得再设覆盖
+  const ses = sshSessions.find(s => s.sid === sid);
+  if (!ses) return;
+  sshOpenPanel();
+  if (sshViewSid === sid) return;
+  // 当前看的终端正跑全屏程序(vim/top 等)时不抢视图:键盘漏斗跟视图走,一换用户的按键就发去别的终端;
+  // 提示符下(链式推进时用户刚回车完,焦点常留在终端)照常切换——面板跟上布防的那台正是需求本体
+  const cur = sshActive();
+  if (cur && cur !== ses && cur.state.alt) return;
+  sshViewSid = sid;
+  renderSshTabs();
+  sshApply();
+  sshBadge();
+  sshFit();
+  const inp = $("input");
+  if (!skipFocus && (!inp || !inp.value.trim())) $("ssh-hidden").focus();
 }
 function sshOpenPanel() {
   const p = $("ssh-panel");
@@ -99,19 +146,19 @@ function sshOpenPanel() {
 }
 function sshClosePanel() { $("ssh-panel").classList.remove("open"); }
 /* ---- 快捷键辅助(Cmd+2/3/4,处理器在 96-hotkeys.js 命令表):开合 / 聚焦当前终端 / 顺序轮换 ---- */
-function sshTogglePanel() {   // 同 #ssh-chip 点击:开 <-> 关;有当前终端则把焦点交给终端输入框
+function sshTogglePanel() {   // 同 #ssh-chip 点击:开 <-> 关;有可视终端则把焦点交给终端输入框
   if ($("ssh-panel").classList.contains("open")) sshClosePanel();
   else sshOpenPanel();
-  if (sshCur()) $("ssh-hidden").focus();
+  if (sshActive()) $("ssh-hidden").focus();
 }
-function sshFocusCurrent() {  // 聚焦当前会话配对的终端(面板关着先开;无终端 no-op)
-  if (!sshCur()) return;
+function sshFocusCurrent() {  // 聚焦面板正在显示的终端(面板关着先开;无终端 no-op)
+  if (!sshActive()) return;
   sshOpenPanel();
   $("ssh-hidden").focus();
 }
-function sshCycleTerm() {     // 按 sshSessions 顺序切到当前终端的下一个(尾回绕;当前无终端则切第一个);不足两个 no-op
+function sshCycleTerm() {     // 按 sshSessions 顺序切到可视终端的下一个(尾回绕;无可视终端则切第一个;不足两个 no-op)
   if (sshSessions.length < 2) return;
-  sshSwitch((sshSessions.findIndex(s => s.chat === curId) + 1) % sshSessions.length);
+  sshSwitch((sshSessions.findIndex(s => s === sshActive()) + 1) % sshSessions.length);
 }
 async function sshConnect(hostId) {
   if (!hostId) {
@@ -131,6 +178,11 @@ async function sshConnect(hostId) {
       return;
     }
     // 1:1 配对:当前会话已带终端则自动新建会话来配("+" 开的第二个终端就是第二个会话)
+    // ops 会话例外:新终端照常配对新会话,但聊天的当前会话留在 ops(ops 驱动全部终端,不该被抢焦点),正在看的终端也保持
+    const opsKeepId = (curMode() === "ops" && sshChatTabs().length) ? curId : null;
+    const opsKeepView = (opsKeepId && sshViewSid) ? sshViewSid : null;
+    const opsFollow = (curMode() === "ops" && sshFollowHost === hostId);   // 重连跟随(一次性):此刻判定并消费标记,连接完成后视图切到新终端
+    sshFollowHost = null;
     if (sshChatTabs().length) newSession(true, { force: true });
     const host = sshHostsCache.find(h => h.id === hostId) || {};
     const cs = curSession();
@@ -151,7 +203,19 @@ async function sshConnect(hostId) {
     sshApply();
     sshPollKick(ses, 40);
     sshBadge();
-    toast("SSH connected: " + j.label + " (type in the terminal on the left" + (ses.pw ? "; saved password will be entered automatically" : "; MFA/OTP goes there too") + ")");
+    if (opsKeepId && sessions.some(x => x.id === opsKeepId)) {
+      switchSession(opsKeepId);   // 切回 ops 会话:终端面板随之回到 ops 会话的视图,新终端留作后台标签
+      if (opsKeepView && sshSessions.some(s => s.sid === opsKeepView) && sshViewSid !== opsKeepView) {
+        sshViewSid = opsKeepView;   // 连接期间用户正在看的终端保持为视图(切会话会清覆盖,这里还原)
+        renderSshTabs();
+        sshApply();
+        sshBadge();
+      }
+      toast("SSH connected: " + j.label + "(已配对新会话;当前保持在 ops 会话,模型可直接驱动新终端)");
+    } else {
+      toast("SSH connected: " + j.label + " (type in the terminal on the left" + (ses.pw ? "; saved password will be entered automatically" : "; MFA/OTP goes there too") + ")");
+    }
+    if (opsFollow) sshSwitchToSid(j.sid);   // 重连完成:视图切到新终端(替换已失效的旧覆盖;重连是显式动作,焦点随新终端合理)
     $("ssh-hidden").focus();
   } catch (e) { toast("SSH connect failed: " + e.message, "err"); }
 }
@@ -162,7 +226,9 @@ function sshCloseSession(i, opts) {
   if (ses.timer) { clearTimeout(ses.timer); ses.timer = null; }
   fetch("/api/ssh/dispose", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: ses.sid }) }).catch(() => {});
   sshSessions.splice(i, 1);
+  if (sshViewSid === ses.sid) sshViewSid = null;   // 关掉的正是视图终端:覆盖失效,回落当前会话配对终端
   sshPersistMeta();
+  opsRenderBar();   // 关了终端顺带重画 ops 等待条(渲染时修剪布防已失效的终端)
   if (!sshSessions.length) {
     $("ssh-screen").textContent = "";
     renderSshTabs();
@@ -171,13 +237,14 @@ function sshCloseSession(i, opts) {
     return;
   }
   renderSshTabs();
-  if (sshCur()) { sshApply(); sshBadge(); sshFit(); }
-  else { $("ssh-screen").textContent = ""; sshBadge(); }   // 关的是当前会话配对的终端:会话保留,暂无终端
+  if (sshActive()) { sshApply(); sshBadge(); sshFit(); }
+  else { $("ssh-screen").textContent = ""; sshBadge(); }   // 当前无可视终端:会话保留(关的是配对终端且无覆盖)
 }
 function sshReconnect() {
-  const c = sshCur();
+  const c = sshActive();
   const hostId = c ? c.hostId : ($("ssh-host-sel").value || "");
   if (!hostId) { toast("No host to reconnect — pick one first", "warn"); return; }
+  if (curMode() === "ops" && c) sshFollowHost = hostId;   // ops:重连的正可能是视图终端,关闭会清覆盖——标记主机,连完视图跟到新终端
   if (c) sshCloseSession(sshSessions.indexOf(c), { keepPanel: true });
   sshConnect(hostId);   // 关闭只解绑,当前会话已无终端 → 重连绑回原会话,不会另建
 }
@@ -195,9 +262,10 @@ function sshWriteTo(ses, data) {
   if (ses && ses.alive) fetch("/api/ssh/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: ses.sid, data }) });
 }
 function sshSend(data) {
-  const c = sshCur();
+  const c = sshActive();   // 键盘漏斗作用于面板正在显示的终端(ops 下= 视图覆盖终端;其余模式= 当前会话配对终端)
   if (!c) return;
   c.lastKey = Date.now();
+  if (data === "\r" && !c.state.alt) opsOnEnter(c);   // ops 布防中:提示符下的回车= 人审执行(自动密码走 sshWriteTo 不经此;备用屏里 vim 换行等回车是应用按键,不触发)
   sshWriteTo(c, data);
   if (!c.pollBusy) { if (c.timer) clearTimeout(c.timer); c.timer = setTimeout(() => { c.timer = null; sshPoll(c); }, 40); }  // 40ms 后抓回显
 }
@@ -215,7 +283,7 @@ async function sshPoll(ses) {
     if (j.ok && j.data) {
       got = true;
       termFeed(ses.state, j.data, sshCols(), sshRows());
-      if (sshCur() === ses) sshApply();
+      if (sshActive() === ses) sshApply();   // 只有面板正在显示的终端才需要重绘(后台终端只积累状态)
       sshMaybeAutoPw(ses);
     }
     if (j.exited != null && ses.alive) {
@@ -226,7 +294,7 @@ async function sshPoll(ses) {
       if (ses.timer) { clearTimeout(ses.timer); ses.timer = null; }
       renderSshTabs();
       sshBadge();
-      if (sshCur() === ses) sshApply();
+      if (sshActive() === ses) sshApply();
       ses.pollBusy = false;
       return;
     }
@@ -239,13 +307,13 @@ async function sshPoll(ses) {
 }
 function sshApply() {
   const el = $("ssh-screen");
-  const c = sshCur();
+  const c = sshActive();
   if (!c) { el.textContent = ""; return; }
   termApplyText(el, c.state, c.alive);
 }
 function sshFit() {
   const el = $("ssh-screen");
-  const c = sshCur();
+  const c = sshActive();
   if (!el || !$("ssh-panel").classList.contains("open") || !c) return;
   const cols = sshCols(), rows = sshRows();
   if (c.state.main) screenResize(c.state.main, cols, rows);  // 主屏保内容调格
@@ -257,7 +325,7 @@ function sshFit() {
   fetch("/api/ssh/resize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: c.sid, cols, rows }) });
 }
 async function sshMasterClose() {
-  const c = sshCur();
+  const c = sshActive();
   if (!c) return;
   try { await sshPost("/api/ssh/master-close", { key: c.key }); } catch {}
   sshCloseSession(sshSessions.indexOf(c));
@@ -321,7 +389,7 @@ async function termQuoteTail() {
   const s = curSession();
   if (!s) return;
   let kind, sid;
-  const sshc = sshCur();
+  const sshc = sshActive();
   if (sshc) { kind = "ssh"; sid = sshc.sid; }
   else if (termSid) { kind = "term"; sid = termSid; }
   else { toast("No terminal yet — connect with /ssh or open the side pane Terminal", "warn"); return; }

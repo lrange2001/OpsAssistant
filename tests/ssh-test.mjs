@@ -324,7 +324,7 @@ window.fetch = async (url, opts) => {
 `;
 
 async function run(browser) {
-  const ctx = await browser.newContext();
+  const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
   const page = await ctx.newPage();
   page.on("dialog", d => d.accept().catch(() => {}));
   page.on("pageerror", e => { fail++; results.push("FAIL 页面异常 " + String(e).slice(0, 200)); });
@@ -1152,6 +1152,58 @@ async function run(browser) {
   }));
   ok("iso: 收尾清场(只余初始会话且无终端)", st.cur === sess1 && st.nSessions === 1 && st.rt === 0 && st.mock === 0 && st.domTabs === 0 &&
     st.chip === "none" && !st.panelOpen && st.disposed.includes("s80-mock") && st.disposed.includes("s81-mock"), JSON.stringify(st));
+
+  /* T30 选区:双击选中不被点击/新输出打断,Cmd+C 复制(Mac 终端基础体验) */
+  await input.fill("/ssh ops");
+  await input.press("Enter");
+  await page.waitForFunction(() => document.querySelectorAll("#ssh-tabs .ssh-tab").length === 1, null, { timeout: 4000 });
+  await page.evaluate(() => window.__ssh.push("SELECT-MARKER-77 tail of buffer\r\nroot@web1:~$ "));
+  await sleep(450);   // 等轮询把内容刷进屏幕
+  st = await page.evaluate(() => {
+    const el = document.querySelector("#ssh-screen");
+    const node = el.firstChild;
+    if (!node || !node.textContent.includes("SELECT-MARKER-77")) return { ok: false };
+    const i = node.textContent.indexOf("SELECT-MARKER-77");
+    const r = document.createRange();
+    r.setStart(node, i); r.setEnd(node, i + "SELECT-MARKER-77".length);
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(r);
+    const b = r.getBoundingClientRect();
+    const focusBefore = document.activeElement && document.activeElement.id;
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: b.left + 2, clientY: b.top + 2 }));
+    return { ok: true, collapsed: sel.isCollapsed, focusAfter: document.activeElement && document.activeElement.id, focusBefore,
+      txt: sel.toString() };
+  });
+  ok("sel: 有选区时点终端不折叠选区也不抢焦点", st.ok && !st.collapsed && st.focusAfter === st.focusBefore && st.txt === "SELECT-MARKER-77",
+    JSON.stringify(st));
+  await page.evaluate(() => window.__ssh.push("AFTER-SELECT-88 new output\r\nroot@web1:~$ "));   // 追加输出:选区那段没变,应按原偏移还原
+  await sleep(500);
+  st = await page.evaluate(() => {
+    const sel = window.getSelection();
+    const el = document.querySelector("#ssh-screen");
+    return { collapsed: sel.isCollapsed, txt: sel.toString(), inScreen: el.textContent.includes("AFTER-SELECT-88") };
+  });
+  ok("sel: 新输出到达后选中那段原样保留", st.inScreen && !st.collapsed && st.txt === "SELECT-MARKER-77", JSON.stringify(st));
+  await page.evaluate(() => {   // 还原真双击后的状态:焦点在终端输入框 + 有选区(第一击聚焦、第二击选中、守卫不再动焦点)
+    document.querySelector("#ssh-hidden").focus();
+    const el = document.querySelector("#ssh-screen");
+    const node = el.firstChild;
+    const i = node.textContent.indexOf("SELECT-MARKER-77");
+    const r = document.createRange();
+    r.setStart(node, i); r.setEnd(node, i + "SELECT-MARKER-77".length);
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(r);
+  });
+  await page.keyboard.press("Meta+c");
+  await sleep(150);
+  st = await page.evaluate(async () => ({
+    sel: window.getSelection().toString(),
+    c03: (window.__ssh.cur() || { writes: [] }).writes.includes("\x03"),
+  }));
+  let clip = "";
+  try { clip = await page.evaluate(() => navigator.clipboard.readText()); } catch (e) {}
+  ok("sel: Cmd+C 复制选区(不进 PTY、选区保留)", clip === "SELECT-MARKER-77" && !st.c03 && st.sel === "SELECT-MARKER-77",
+    "clip=" + JSON.stringify(clip) + " " + JSON.stringify(st));
 
   await browser.close();
 }

@@ -31,7 +31,8 @@ ForFreedom Assistant 是跑在 Mac 上的**工具代理型 AI 助手**,面向内
 | **SSH 多终端** | 主机档案 + 分组管理、密钥管理(生成/指纹/公钥)、密码可选记忆、多终端标签,每个终端与一个聊天会话 1:1 配对 |
 | **左终端右对话** | 真实 PTY 终端,支持 vim/top 等全屏程序;竖直分隔条拖宽;Cmd+1~4 聚焦/轮换/开合 |
 | **`/vvv` 终端上下文** | 当前终端的命令与输出增量带给模型;`/download`、`/upload` 走 SSH 复用通道免二次认证 |
-| **定时巡检** | 无人值守任务(每天 9 点检查磁盘/容器状态并总结之类),应用开着自动跑(当前为本机任务,远程巡检随规划中的 ops 模式提供) |
+| **定时巡检** | 无人值守任务(每天 9 点检查磁盘/容器状态并总结之类),应用开着自动跑(当前为本机任务) |
+| **ops 模式** | `/mode ops` 进入:模型把命令逐台打进在线 SSH 终端输入行、绝不代按回车,你回车执行、输出自动读回分析,逐台链式直到完成;同机多开的终端自动分组,同组只放一台 |
 | **本地开发全套** | 命令执行实时输出、文件读写 diff、Git 面板(分支/提交/推送确认)、改文件前自动检查点可回滚 |
 | **工程化对话** | 多会话并行生成、排队/引导两种运行中输入、深度思考折叠、上下文压缩(可视化进度,可取消)、长文本折叠、`@` 文件引用、`$` 技能、子代理、MCP 插件、Cmd+K 命令中心、全量快捷键改绑 |
 
@@ -195,11 +196,11 @@ zsh mac-app/update.sh
 ```
 llama-chat/
 ├── server.py            # 薄壳入口(from backend.main import main)
-├── backend/             # 后端包(23 个模块:datadir/config/tools/ssh/httpapi 等)
+├── backend/             # 后端包(24 个模块:datadir/config/tools/ssh/ops/httpapi 等)
 ├── index.html           # 前端壳:结构 + 有序传统 script
 ├── static/              # 前端资源(js/、css/、vendored Vue,无构建步骤)
 ├── mac-app/             # Swift 壳与打包:build.sh / test.sh / update.sh
-├── tests/               # Playwright 套件(七个)
+├── tests/               # Playwright 套件(八个)
 ├── tools/               # 辅助脚本(前端拆分验收、README 截图摆拍)
 ├── docs/                # 专项设计记录与截图
 ├── 使用手册.md           # 完整用户手册
@@ -218,12 +219,13 @@ zsh mac-app/test.sh                           # 七步冒烟(第 7 步走真实�
 
 | 套件 | 覆盖 | 基线 |
 | --- | --- | --- |
-| ssh-test | SSH 服务端 + 页面全交互 | 136 |
+| ssh-test | SSH 服务端 + 页面全交互(含终端选区与 Cmd+C) | 139 |
 | deep-test | 深度 UI 全功能 | 98 |
 | longtext-test | 长文本折叠、行区间、查找展开 | 42 |
 | parallel-test | 多会话并行生成 | 30 |
 | term-render | 终端 vt100 渲染 | 36 |
 | ssh2-srv / ssh2-ui | 分组与密钥(服务端/UI) | 37 / 26 |
+| ops-test | ops 模式:UI 状态机 + ops.py 服务端直测 | 50 |
 
 README 截图为 `tools/screenshot.mjs` 对开发实例的摆拍(mock 模型与 SSH 数据流,不含真实数据)。
 

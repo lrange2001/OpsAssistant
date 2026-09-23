@@ -1,6 +1,6 @@
 #!/bin/zsh
 # 构建 ForFreedom Assistant.app
-# 用法:zsh ~/ForFreedom/llama-chat/mac-app/build.sh
+# 用法:zsh ~/ForFreedom/code/FreedomAssistant/mac-app/build.sh
 set -e
 cd "$(dirname "$0")"
 

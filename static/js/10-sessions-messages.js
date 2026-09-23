@@ -24,20 +24,32 @@ const MODE_INFO = {
   build: { label: "build", desc: "构建模式(默认):安全操作自动执行,危险命令(删除/sudo 等)需要确认" },
   edit: { label: "edit", desc: "编辑模式:文件读写自动执行,所有 shell 命令需要确认" },
   yolo: { label: "yolo", desc: "完全自动:所有操作直接执行(拒绝规则仍然生效)" },
+  ops: { label: "ops", desc: "运维模式:模型把命令逐条打进在线 SSH 终端输入行、绝不代按回车,你回车执行、输出自动读回,逐台链式直到完成" },
 };
-const MODE_ORDER = ["plan", "build", "edit", "yolo"];
+const MODE_ORDER = ["plan", "build", "edit", "yolo", "ops"];
 
 function curMode() { const s = curSession(); return (s && s.mode) || permMode; }
 function setMode(m, quiet) {
-  if (!MODE_INFO[m]) return;
+  if (!MODE_INFO[m]) return false;
+  if (m === "ops" && !(typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive))) { toast("ops 模式需要至少一个在线 SSH 终端(先 /ssh 连接)", "warn"); return false; }
   permMode = m;
   localStorage.setItem("ff-perm-mode", m);
+  sshViewSid = null;   // 模式切换丢弃 ops 视图覆盖(退出 ops 后必须回到纯 1:1 配对语义;10-sessions 在 80-ssh 之前加载,但 setMode 只在全部脚本就绪后运行)
+  if (typeof sshSyncChat === "function") sshSyncChat();   // 清覆盖必须连画面一起回落:否则屏幕停在旧视图终端,键盘却已切回配对终端,键入发进看不见的机器
   const s = curSession();
   if (s) { s.mode = m; persist(); }
   renderModeRadios();
+  if (m === "ops") opsFollowArmed();   // 进入 ops:本会话还有等待回车的终端时面板跟过去(与切回会话、刷新还原同语义)
   if (!quiet) toast("Mode: " + m);
+  return true;
 }
-function cycleMode() { setMode(MODE_ORDER[(MODE_ORDER.indexOf(curMode()) + 1) % MODE_ORDER.length]); }
+function cycleMode() {   // 循环切换;ops 需在线 SSH 终端,无终端时跳过继续找下一个有资格的
+  const ok = (m) => m !== "ops" || (typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive));
+  for (let i = 1; i <= MODE_ORDER.length; i++) {
+    const m = MODE_ORDER[(MODE_ORDER.indexOf(curMode()) + i) % MODE_ORDER.length];
+    if (ok(m)) { setMode(m); return; }
+  }
+}
 
 /* 采样参数(温度/Top-P/Top-K)已删除:本地跟 llama-server 启动参数、云端跟供应商默认,请求不携带;
    长度与轮数保留应用内可调,默认值随软件内置(多机分发零配置) */
@@ -116,10 +128,13 @@ function switchSession(id) {
   curId = id;
   renderSessionList(); renderMessages(); loadDraft(); closeHistory();
   renderUsageHint();   // 输入框旁用量提示随会话切换刷新(每会话独立累计)
+  sshViewSid = null;   // 切会话:终端视图跟随新会话配对的终端,丢弃 ops 的视图覆盖(看哪台与哪个会话重新对齐)
   sshSyncChat();   // 激活新会话配对的终端(无配对则无 active 标签)
   updateSendBtn(); updatePlaceholder();   // 生成态随会话走:后台流不打断,发送键/占位符按新会话刷新
   renderQueued();                         // 队列每会话独立:换会话后排队条按新会话重画
   setTimeout(() => drainQueue(id), 60);   // 新会话自己的队列择机流出(生成中/暂停由 drainQueue 自行拦截)
+  opsRenderBar();                         // ops 等待条按会话重画(只显示当前会话的布防)
+  opsFollowArmed();                       // 切回 ops 会话:有待回车的终端时面板跟过去(与刷新还原同语义;不抢焦点)
 }
 
 function renderSessionList() {

@@ -28,7 +28,11 @@ from .ssh import SSHS, _bad_text, _ssh_spec_from_body, api_ssh_groups_save, api_
 from .term import TERMS
 from .textutil import _trunc, dir_hints, fix_arguments, strip_emoji
 from .tools_builtin import TOOL_DEFS, TOOL_IMPL, tool_list_dir, tool_read_file
+from .ops import build_ops_system_block, ops_plan_gate, ops_register, ops_result_text
 from .usage import log_usage, usage_summary
+
+# ops 模式工具注册:模块加载即挂入全局工具表(与 tools_extra 的注册同相位)
+ops_register()
 
 # ---- split body (verify: 勿动本行以上) ----
 # ---------------------------- HTTP 服务 ----------------------------
@@ -689,21 +693,29 @@ class Handler(BaseHTTPRequestHandler):
         extra_system = (extra_system + "\n\n" if extra_system else "") + (
             "# currentDate\nToday's date is " + time.strftime("%A, %B %d, %Y") + ".")
         extra_system = (extra_system + "\n\n" if extra_system else "") + "输出规范:任何回复中都严格禁止出现 emoji 表情符号,一个都不许有。"
+        auto_approve = bool(body.get("auto_approve", True))
+        # 权限模式(ZCode:plan/build/edit/yolo/ops);没带 mode 时按旧 auto_approve 语义映射
+        mode = body.get("mode") or ("yolo" if auto_approve else "build")
+        # ops 协议块必须在 sanitize_messages 之前并入 extra_system(首条 system 在此固化,事后追加无效)
+        if mode == "ops":
+            extra_system = (extra_system + "\n\n" if extra_system else "") + build_ops_system_block()
         messages = sanitize_messages(body.get("messages") or [], extra_system=extra_system)
         params = body.get("params") or {}
         tools_enabled = bool(body.get("tools_enabled", True))
-        auto_approve = bool(body.get("auto_approve", True))
         execute_pending = bool(body.get("execute_pending", False))
         # 工具轮数不再由应用端限制(设置页已删滑杆):内置 64 轮防死循环兜底,实际上下文耗尽是天然上限
         max_rounds = int(body.get("max_rounds") or 64)
-        # 权限模式(ZCode:plan/build/edit/yolo);没带 mode 时按旧 auto_approve 语义映射
-        mode = body.get("mode") or ("yolo" if auto_approve else "build")
 
         all_tools = TOOL_DEFS + (MCP.tool_defs() if tools_enabled else [])
         if not tools_enabled:
             all_tools = []
+        if mode == "ops":
+            # ops 双工具是模式本体,不随「工具」开关关停(开关只管常规工具与 MCP),且其余工具不进本轮工具表;
+            # 工具表为空时模型只能照系统块"口述"调用,命令永远进不了终端
+            all_tools = [t for t in TOOL_DEFS if t["function"]["name"] in ("ops_type", "ops_read")]
 
         append_messages = []
+        ops_armed_sids = set()  # ops 模式:本轮已放置命令的终端 sid(一轮一条,armed 即强制收轮)
         usage_total = {"in": 0, "out": 0}
         round_no = 0
         wrote_usage = {"logged": False}
@@ -766,6 +778,8 @@ class Handler(BaseHTTPRequestHandler):
                 decision = permission_decision(mode, name, args, config.CONFIG, session_cwd)
                 if not auto_approve:
                     decision = "deny" if decision == "deny" else "ask"
+                if name in ("ops_type", "ops_read"):
+                    decision = "auto"  # ops 工具只打字不执行,永不出审批卡,回车即人审
                 plan.append({"call": call, "name": name, "args": args,
                              "decision": decision, "risk": risk_level(name, args)})
             return plan
@@ -790,12 +804,24 @@ class Handler(BaseHTTPRequestHandler):
                     r = {"ok": False, "error": p["err"]}
                 elif p.get("decision") == "deny":
                     r = {"ok": False, "status": "denied", "error": "该操作被拒绝规则禁止(可在 设置 > 权限 调整)"}
+                elif name == "ops_type":
+                    # ops 一轮一条:本轮已放置过(或静态校验不过)在此拦下,等输出再决定下一步
+                    gate_err = ops_plan_gate(p["args"], ops_armed_sids)
+                    if gate_err:
+                        r = {"ok": False, "error": gate_err}
+                    else:
+                        try:
+                            r = dispatch_with_progress(call, name, p["args"])
+                        except Exception as e:
+                            r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                        if r.get("ok") and r.get("sid"):
+                            ops_armed_sids.add(r["sid"])
                 else:
                     try:
                         r = dispatch_with_progress(call, name, p["args"])
                     except Exception as e:
                         r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-                content = result_to_model_text(name, r)
+                content = ops_result_text(name, r) if name in ("ops_type", "ops_read") else result_to_model_text(name, r)
                 emit({"type": "tool_result", "id": call.get("id"), "name": name, "result": r})
                 tool_msgs.append({"role": "tool", "tool_call_id": call.get("id"), "content": content, "_meta": r})
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
@@ -891,6 +917,12 @@ class Handler(BaseHTTPRequestHandler):
                           "append_messages": append_messages})
                     return
                 execute_plan(plan)
+                if mode == "ops" and ops_armed_sids:
+                    # ops 已放置命令:强制收轮,等用户回车后的 [Ops] 触发消息再来
+                    log_turn_usage()
+                    emit({"type": "done", "reason": "ops_armed", "usage": usage_total,
+                          "append_messages": append_messages})
+                    return
                 if round_no >= max_rounds:
                     log_turn_usage()
                     emit({"type": "done", "reason": "max_rounds", "usage": usage_total, "append_messages": append_messages})

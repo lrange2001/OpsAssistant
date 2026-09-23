@@ -86,6 +86,8 @@
   .queued-chip button { border: none; background: none; color: var(--muted); font-size: 13px; padding: 0 4px; line-height: 1; }
   .queued-chip button:hover { color: var(--danger); }
   .queued-chip .lbl { color: var(--muted); font-size: 10.5px; }
+  /* ops 等待回车条:布局复用 queued-bar/lbl 用强调色,与 queued/skill 等被动 chip 区分(等用户动作) */
+  #ops-bar .queued-chip .lbl { color: var(--accent); }
   .chip.flash { animation: chipflash 1.2s ease; }
   @keyframes chipflash { 0% { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px var(--accent); } }
   .icon-btn {

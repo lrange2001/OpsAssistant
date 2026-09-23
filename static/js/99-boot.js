@@ -227,9 +227,14 @@ async function init() {
   document.querySelectorAll(".sp-tabs .tab2").forEach(b => {
     b.onclick = () => switchSpTab(b.dataset.spt);
   });
-  $("term-screen").onclick = () => { termEnsure(); $("term-hidden").focus(); };
+  $("term-screen").onclick = () => {
+    termEnsure();
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) $("term-hidden").focus();   // 双击/拖拽选中时不抢焦点:焦点一进输入框选区立刻被折叠
+  };
   $("term-hidden").addEventListener("keydown", (e) => {
     e.stopPropagation();  // 终端独占按键:不冒泡,全局分发器/浮层(Esc 关抽屉等)不得再反应一次
+    if (e.metaKey && !e.altKey && !e.ctrlKey && (e.key === "c" || e.key === "C") && copyTermSelection()) { e.preventDefault(); return; }   // 选中文字后 Cmd+C 拷贝(Mac 习惯;无选区不拦截)
     if (dispatchTermOkKeys(e)) return;  // termOk 命令(抓终端增量)优先
     const d = termKeyData(e);
     if (d != null) { termSend(d); e.preventDefault(); }
@@ -241,9 +246,18 @@ async function init() {
   });
 
   /* ---- SSH 左右分栏面板:键盘转发 / 连接管理 / 拖竖直分隔条调宽 ---- */
-  $("ssh-screen").onclick = () => { sshOpenPanel(); $("ssh-hidden").focus(); };
+  $("ssh-screen").onclick = () => {
+    sshOpenPanel();
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) $("ssh-hidden").focus();   // 双击/拖拽选中时不抢焦点:焦点一进输入框选区立刻被折叠
+  };
   $("ssh-hidden").addEventListener("keydown", (e) => {
     e.stopPropagation();  // 终端独占按键:不冒泡,全局分发器/浮层不得再反应一次
+    if (e.metaKey && !e.altKey && !e.ctrlKey && (e.key === "c" || e.key === "C") && copyTermSelection()) { e.preventDefault(); return; }   // 选中文字后 Cmd+C 拷贝(Mac 习惯;无选区不拦截)
+    // ops 等待回车时 Esc 先取消等待;真取消了才拦截(否则 \x1b 照发进 vim 等)。
+    // 备用屏(全屏程序 vim/top/less)里的 Esc 是应用按键,永远直发终端——否则 vim 退不出插入模式,:wq 变成往文件里打字
+    const actS = sshActive();
+    if (e.key === "Escape" && !(actS && actS.state.alt) && opsAnyActive() && opsCancelArmed()) return;   // 无可视终端时也允许取消;仅备用屏(vim/top)内 Esc 是程序按键放行
     if (dispatchTermOkKeys(e)) return;  // termOk 命令(抓终端增量)优先
     const d = termKeyData(e);
     if (d != null) { sshSend(d); e.preventDefault(); }
@@ -280,7 +294,7 @@ async function init() {
     });
   }
   renderSshHosts();   // 载入主机下拉(面板与 /ssh 共用缓存)
-  sshReattach();      // 刷新页面后重挂活着的 SSH 会话
+  sshReattach().then(opsInit);   // 刷新页面后重挂活着的 SSH 会话;完成后还原 ops 布防(需先重建 sshSessions,否则提示条会误清全部布防)
   $("term-bg-run").onclick = async () => {
     const cmd = $("term-cmd").value.trim();
     if (!cmd) return;
@@ -503,7 +517,7 @@ async function init() {
     if (e.target.id === "git-push-dlg") $("git-push-dlg").classList.remove("open");
   });
   document.addEventListener("keydown", (e) => {
-    // Esc 优先级:发送确认 > Git 推送确认 > 分支下拉 > 命令中心 > 查找 > 抽屉 > 历史 > 状态面板 > 停止生成(输入面板的 Esc 由 palKeydown 先处理)
+    // Esc 优先级:发送确认 > Git 推送确认 > 分支下拉 > 命令中心 > 查找 > 抽屉 > 历史 > 状态面板 > ops 等待回车 > 停止生成(输入面板的 Esc 由 palKeydown 先处理)
     if (e.key === "Escape") {
       if ($("send-confirm").style.display === "flex") { e.preventDefault(); cancelSendConfirm(); }
       else if ($("git-push-dlg").classList.contains("open")) { e.preventDefault(); $("git-push-dlg").classList.remove("open"); }
@@ -513,6 +527,7 @@ async function init() {
       else if ($("drawer").classList.contains("open")) { e.preventDefault(); closeDrawer(); }
       else if (!$("history-dd").classList.contains("hidden")) { e.preventDefault(); closeHistory(); }
       else if ($("status-pop").classList.contains("open")) { e.preventDefault(); $("status-pop").classList.remove("open"); }
+      else if (opsAnyActive()) { e.preventDefault(); opsCancelArmed(); if (isGenerating()) abortSession(); }   // ops:取消等待回车;布防会话仍在生成则一并停流
       else if (isGenerating()) abortSession();
       return;
     }

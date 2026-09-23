@@ -45,6 +45,12 @@ function buildToolCard(call, { pending = false } = {}) {
   const a = call.arguments || {};
   const cmdLine = (txt) => { const c = document.createElement("div"); c.className = "cmd"; c.textContent = txt; card.appendChild(c); };
   if (call.name === "run_shell" && a.command) cmdLine(a.command);
+  else if (call.name === "ops_type" && a.command != null) {
+    cmdLine(`[${a.terminal || "-"}] ${a.command}`);
+    const h = document.createElement("div"); h.className = "hint-text"; h.textContent = "已打入终端输入行,未回车 —— 在终端按 Enter 执行后自动分析";
+    card.appendChild(h);
+  }
+  else if (call.name === "ops_read") cmdLine(`read ${a.terminal || "-"} · ${a.wait || "wait"}`);
   else if (call.name === "write_file" && a.path != null) cmdLine(`write ${a.path} (${(a.content || "").length} chars)`);
   else if (call.name === "edit_file" && a.path != null) cmdLine(`edit ${a.path}`);
   else if (call.name === "read_file" && a.path) cmdLine(`read ${a.path}`);
@@ -219,6 +225,12 @@ function attachToolResult(card, toolMsg, ownerMsg) {
     head.textContent = r.replaced ? `Edited ${r.path}` : `Written ${r.path} (${r.bytes} bytes)`;
     card.appendChild(head);
     card.appendChild(diffEl(r.diff));
+  } else if (name === "ops_read") {
+    // ops 读取:增量文本尾部 2000 字符;超时 / 终端断开各附标注
+    const t = (r.timed_out ? "(等待超时,输出可能未完)\n" : "") + (r.text || "(无新输出)") + (r.alive === false ? "\n(终端已断开)" : "");
+    addOut(t.length > 2000 ? "…" + t.slice(-2000) : t);
+  } else if (name === "ops_type") {
+    addOut("等待回车");
   } else {
     const out = document.createElement("div"); out.className = "out";
     out.textContent = r.bytes != null ? `Written ${r.path} (${r.bytes} bytes)` : (r.path ? r.path : "Done");
@@ -471,6 +483,7 @@ function renderMessages() {
   $("welcome").style.display = empty ? "" : "none";
   if (empty) renderWelcome();
   if (s) for (const m of s.messages) {
+    if (m.ops) continue;   // ops 引导消息为系统注入,不进时间线
     if (m.round >= 2) {  // 多轮工具回合的分隔条,重渲染后仍保留
       const sep = document.createElement("div"); sep.className = "round-sep";
       sep.textContent = `Round ${m.round}`;

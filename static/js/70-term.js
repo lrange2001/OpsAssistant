@@ -225,8 +225,48 @@ function termAppendText(st, s) {  // 应用层文本(退出横幅等):退出备�
 }
 function termApplyText(el, st, alive) {
   const sc = st.alt ? st.screen : st.main;
-  el.textContent = sc ? screenRender(sc, alive) : "";
+  const txt = sc ? screenRender(sc, alive) : "";
+  if (el.textContent === txt) return;   // 内容没变不碰 DOM:选区与滚动位置原样保留(双击选中后可从容 Cmd+C)
+  // 选中文字时出了新输出:若选中的那段在新文本里原样还在(只有别处变了),写回后按原偏移还原选区,复制不被打断
+  const sel = window.getSelection();
+  let keep = null;
+  if (sel && sel.rangeCount > 0 && !sel.isCollapsed && el.contains(sel.anchorNode) && el.contains(sel.focusNode)) {
+    try {
+      const r = sel.getRangeAt(0);
+      const head = document.createRange();
+      head.selectNodeContents(el); head.setEnd(r.startContainer, r.startOffset);
+      const tail = document.createRange();
+      tail.selectNodeContents(el); tail.setEnd(r.endContainer, r.endOffset);
+      const s0 = head.toString().length, s1 = tail.toString().length;
+      if (s0 < s1 && s1 <= txt.length && txt.slice(s0, s1) === el.textContent.slice(s0, s1)) keep = { s0, s1 };
+    } catch (e) {}
+  }
+  el.textContent = txt;
+  if (keep && el.firstChild) {
+    try {
+      const r2 = document.createRange();
+      r2.setStart(el.firstChild, keep.s0);
+      r2.setEnd(el.firstChild, keep.s1);
+      sel.removeAllRanges();
+      sel.addRange(r2);
+    } catch (e) {}
+  }
   el.scrollTop = el.scrollHeight;
+}
+/* 终端选区复制(Mac 习惯:双击/拖拽选中文字后 Cmd+C 拷走;无选区返回 false,不拦截按键) */
+function copyTermSelection() {
+  const sel = window.getSelection();
+  const t = sel && sel.rangeCount > 0 && !sel.isCollapsed ? sel.toString() : "";
+  if (!t) return false;
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).catch(() => {});
+  else {
+    const ta = document.createElement("textarea");
+    ta.value = t; ta.style.cssText = "position:fixed;left:-9999px";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+  }
+  return true;
 }
 async function termEnsure() {
   if (termSid) return;
@@ -312,7 +352,7 @@ function termReset() {
   $("term-screen").textContent = "";
   termEnsure();
 }
-const TERM_KEYS = { Enter: "\r", Backspace: "\x7f", Tab: "\t", ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D", Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~" };
+const TERM_KEYS = { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b", ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D", Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~" };
 const TERM_CTRL = { c: "\x03", d: "\x04", l: "\x0c", u: "\x15", a: "\x01", e: "\x05", w: "\x17", k: "\x0b", z: "\x1a", b: "\x02", f: "\x06", n: "\x0e", p: "\x10", r: "\x12", t: "\x14", g: "\x07", v: "\x16", y: "\x19" };
 // 键盘事件 → 发往 PTY 的字节。Delete/方向键按 Mac 习惯补齐组合:
 // Cmd/Alt+Backspace 删词删行、Cmd+←→ 行首行尾、Alt+←→ 按词移动、Alt+字符 ESC 前缀;

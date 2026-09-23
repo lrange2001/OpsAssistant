@@ -259,6 +259,7 @@ async function runTurn({ executePending = false, session = null } = {}) {
             scrollBottom();
           }
           (live._results = live._results || {})[ev.id] = ev.result;  // DOM 缺失也照记,重渲染/中断后不丢
+          if (ev.name === "ops_type" && ev.result && ev.result.ok) opsArmFromResult(ev.result, s);   // ops:回车布防到 r.sid 终端(归属本回合会话)
         } else if (ev.type === "checkpoint") {
           // agent 修改文件前自动落的检查点
           s.checkpoints = [{ id: ev.id, createdAt: ev.createdAt, label: ev.label, files: ev.files }, ...(s.checkpoints || [])].slice(0, 50);
@@ -307,6 +308,7 @@ async function runTurn({ executePending = false, session = null } = {}) {
     }
   } finally {
     setGenerating(false, s.id);   // 注销本回合并刷新发送键/占位符/会话列表
+    opsRenderBar();   // ops:回合注销后重画——「读取输出中」chip 据此消失(done 时回合还在,画了会滞留);「等待回车」不受影响
     // 后台系统通知:完成 / 出错 / 等待确认(手动停止与转向不打扰);带会话,由通知方按会话路由
     if (outcome === "done") {
       const last = [...s.messages].reverse().find(m => m.role === "assistant" && !m.local && m.content);

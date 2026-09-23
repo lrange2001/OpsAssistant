@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""权限引擎:四模式、allow/deny 规则匹配与风险分级"""
+"""权限引擎:五模式(plan/build/edit/yolo/ops)、allow/deny 规则匹配与风险分级"""
 
 import os
 import re
@@ -12,7 +12,7 @@ _DANGER_CMD = re.compile(
     r"chmod\s+-R\s+0?777\s+/|mv\s+/\S+\s+/dev/)",
     re.IGNORECASE)
 
-PERMISSION_MODES = ("plan", "build", "edit", "yolo")
+PERMISSION_MODES = ("plan", "build", "edit", "yolo", "ops")
 
 
 def rule_matches(rules, kind, value, cwd=None):
@@ -44,6 +44,9 @@ def shell_cmd_key(cmd):
 
 def permission_decision(mode, name, args, cfg, cwd=None):
     """返回 "auto" | "ask" | "deny"(deny 由规则显式产生);cwd 用于项目范围规则"""
+    # ops 工具只打字不执行,回车即人审:恒 auto,永不出审批卡
+    if name in ("ops_type", "ops_read"):
+        return "auto"
     allow, deny = cfg.get("allow_rules") or [], cfg.get("deny_rules") or []
     if name == "run_shell":
         cmd = str(args.get("command") or "")
@@ -79,6 +82,8 @@ def risk_level(name, args):
         return "high" if _DANGER_CMD.search(str(args.get("command") or "")) else "medium"
     if name in ("write_file", "edit_file"):
         return "medium"
+    if name in ("ops_type", "ops_read"):
+        return "low"  # ops 只放置命令不执行,风险在用户回车那一步
     return "low"
 
 
