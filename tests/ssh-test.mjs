@@ -223,6 +223,30 @@ async function serverSideTests() {
   ok("srv: download cwd=/ 兜底到 ~(回归 Read-only file system)",
      !r.ok && /已存在/.test(r.error || "") && r.error.includes(probe), JSON.stringify(r.error));
   unlinkSync(probe);
+  // 显式相对 dest 按会话 cwd 解析(回归:此前按服务进程 cwd 落点,进程在 / 时拼出 /xxx 只读崩)
+  const rel = join(homedir(), "ff-ssh-dl-rel.txt");
+  writeFileSync(rel, "x");
+  r = await (await fetch(BASE + "/api/ssh/download", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sid: sid3, remote: "x.log", dest: "ff-ssh-dl-rel.txt", cwd: "~" }),
+  })).json();
+  ok("srv: 显式相对 dest 按会话目录解析(409 报 home 下路径)",
+     !r.ok && /已存在/.test(r.error || "") && r.error.includes(rel), JSON.stringify(r.error));
+  unlinkSync(rel);
+  // 显式 dest 落只读目录:实探拦截(os.access 在 macOS 根目录会误报可写)
+  r = await (await fetch(BASE + "/api/ssh/download", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sid: sid3, remote: "/tmp/x.log", dest: "/ff-nope.txt" }),
+  })).json();
+  ok("srv: dest 目录不可写拒绝并给省略提示",
+     !r.ok && /不可写/.test(r.error || "") && /省略本地目标/.test(r.error || ""), JSON.stringify(r.error));
+  // /api/ssh/complete 校验分支
+  r = await (await fetch(BASE + "/api/ssh/complete?sid=s0-none&q=/var")).json();
+  ok("srv: complete 无会话 404(先 /ssh)", !r.ok && /先 \/ssh/.test(r.error || ""), JSON.stringify(r.error));
+  r = await (await fetch(BASE + "/api/ssh/complete?sid=" + encodeURIComponent(sid3) + "&q=" + encodeURIComponent("bad\npath"))).json();
+  ok("srv: complete 控制字符前缀拒绝", !r.ok && /控制字符/.test(r.error || ""), JSON.stringify(r.error));
+  r = await (await fetch(BASE + "/api/ssh/complete?sid=" + encodeURIComponent(sid3) + "&q=/var/l")).json();
+  ok("srv: complete 走真实通道,连接拒绝时给明确报错", !r.ok && /补全失败/.test(r.error || ""), JSON.stringify(r.error));
   r = await (await fetch(BASE + "/api/ssh/download", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sid: sid3, remote: "bad\npath" }),
@@ -253,7 +277,7 @@ const INIT = `
 window.__chatBodies = [];
 window.__ssh = {
   sidSeq: 0, sessions: [],   // 每个已连接终端一个 {sid,label,hostId,key,out,hist,writes,exited}
-  connects: [], posts: [], resizes: [], disposed: [],
+  connects: [], posts: [], resizes: [], disposed: [], completes: [], completeItems: [],
   hosts: [
     { id: "h-ops", label: "ops", host: "10.0.0.8", port: 22, user: "ops", key_path: "", jump: "", persist_min: 15, notes: "app box", password: "pw-ops-123" },
     { id: "h-web", label: "web", host: "10.0.0.9", port: 2222, user: "root", key_path: "", jump: "", persist_min: 30, notes: "", password: "" },
@@ -360,6 +384,10 @@ window.fetch = async (url, opts) => {
         alive: x.exited === null, bytes: x.hist.length, input_bytes: x.writes.join("").length, last_ts: Date.now() }));
       const keys = [...new Set(S.sessions.filter(x => x.exited === null).map(x => x.key))];
       return reply({ ok: true, sessions, masters: keys.map(k => ({ key: k, path: "/tmp/" + k, alive: true })) });
+    }
+    if (path === "complete") {   // 远端路径补全:默认空候选(不拦 T13 的 fill+Enter 直发流),用例可设 completeItems
+      S.completes.push(String(qs.get("q") || ""));
+      return reply({ ok: true, items: S.completeItems || [] });
     }
     if (path === "download" || path === "upload" || path === "master-close") {
       const body = JSON.parse(opts.body || "{}");
@@ -602,6 +630,85 @@ async function run(browser) {
   await input.press("Enter");
   await sleep(600);
   ok("dl: 成功结果展示", await page.evaluate(() => [...document.querySelectorAll(".msg.local .bubble")].some(b => /Downloaded to .*\/abs\/dest\/app\.log/.test(b.textContent))));
+
+  /* T13b /download //upload 路径参数补全(输入即出候选,免按 Tab) */
+  let dlN = await page.evaluate(() => window.__ssh.posts.filter(p => p.ep === "download").length);
+  await page.evaluate(() => {
+    window.__ssh.completes = [];
+    window.__ssh.completeItems = [
+      { name: "/var/log/nginx/", dir: true },
+      { name: "/var/log/nfswatch.log", dir: false },
+    ];
+  });
+  await input.fill("/download /var/log/n");
+  await sleep(300);
+  st = await page.evaluate(() => ({
+    open: palOpen(),
+    items: ddPalItems.map(i => i.kind + ":" + i.tag),
+    q: window.__ssh.completes[0],
+  }));
+  ok("path: 远端候选输入即出(经 /api/ssh/complete)",
+     st.open && st.items.length === 2 && st.items[0] === "path:dir" && st.items[1] === "path:file" && st.q === "/var/log/n",
+     JSON.stringify(st));
+  await input.press("Enter");
+  await sleep(250);
+  st = await page.evaluate(() => ({
+    val: document.querySelector("#input").value,
+    dlN: window.__ssh.posts.filter(p => p.ep === "download").length,
+  }));
+  ok("path: Enter 接受首候选(目录带尾 /,不误发)",
+     st.val === "/download /var/log/nginx/" && st.dlN === dlN, JSON.stringify(st));
+  await page.evaluate(() => { window.__ssh.completeItems = [{ name: "/etc/os-release", dir: false }]; });
+  await input.fill("/download /etc/os-r");
+  await sleep(300);
+  st = await page.evaluate(() => {
+    const ta = document.querySelector("#input");
+    return { val: ta.value, ss: ta.selectionStart, se: ta.selectionEnd, open: palOpen() };
+  });
+  ok("path: 唯一文件自动展开(补全段成选区,续打即覆盖)",
+     st.val === "/download /etc/os-release" && st.ss === "/download /etc/os-r".length && st.se === st.val.length && !st.open,
+     JSON.stringify(st));
+  await input.press("Enter");
+  await sleep(400);
+  st = await page.evaluate(() => ({
+    val: document.querySelector("#input").value,
+    post: window.__ssh.posts.filter(p => p.ep === "download").pop(),
+  }));
+  ok("path: 补全完整后 Enter 原样发送", st.val === "" && st.post && st.post.body.remote === "/etc/os-release", JSON.stringify(st));
+  // 本地参数(download 第二参 / upload 第一参)走 /api/dir-hint:临时包一层 fetch 下桩
+  await page.evaluate(() => {
+    window.__dirHintQs = [];
+    window.__wrapFetch = window.fetch;
+    window.fetch = async (url, opts) => {
+      const u = String(url);
+      if (u.includes("/api/dir-hint")) {
+        window.__dirHintQs.push(u);
+        return new Response(JSON.stringify({ ok: true, parent: "/Users/demo", items: [{ name: "logs", dir: true }] }),
+          { headers: { "Content-Type": "application/json" } });
+      }
+      return window.__wrapFetch(url, opts);
+    };
+  });
+  await input.fill("/download /var/log/x /Users/demo/l");
+  await sleep(300);
+  st = await page.evaluate(() => {
+    const ta = document.querySelector("#input");
+    return { val: ta.value, n: window.__dirHintQs.length, q0: decodeURIComponent((window.__dirHintQs[0] || "").split("q=")[1] || "") };
+  });
+  await page.evaluate(() => {
+    window.fetch = window.__wrapFetch;
+    window.__ssh.completeItems = [];
+  });
+  ok("path: 本地参数同样自动展开(dir-hint,唯一目录下钻带尾 /)",
+     st.val === "/download /var/log/x /Users/demo/logs/" && st.n >= 1 && st.q0.endsWith("/Users/demo/l"), JSON.stringify(st));
+  st = await page.evaluate(() => ({
+    a: pathArgInfo("/upload /var/l"),
+    b: pathArgInfo("/upload /var/x.log /remote/p"),
+    c: pathArgInfo('/download "/quo ted"'),
+    d: pathArgInfo("/download"),
+  }));
+  ok("path: 参数位置映射(download 远端在前,upload 相反;引号路径不补)",
+     st.a && st.a.kind === "local" && st.b && st.b.kind === "remote" && !st.c && !st.d, JSON.stringify(st));
 
   /* T14 /upload 参数拼装 */
   await input.fill("/upload ~/proj/a.tar.gz /tmp/a.tar.gz");

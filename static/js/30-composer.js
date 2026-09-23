@@ -360,6 +360,10 @@ function palAccept(i) {
   else if (it.kind === "file") {
     ta.value = ta.value.replace(/(^|\s)@\S*$/, (m0, lead) => lead + it.insert + " ");
   }
+  else if (it.kind === "path") {
+    const suf = it.dir ? (it.insert.endsWith("/") ? "" : "/") : " ";   // 目录收尾 /(远端目录项自带),文件收尾空格
+    ta.value = ta.value.replace(/\S*$/, it.insert + suf);   // 替换正在输的路径令牌
+  }
   palClose(); ta.focus();
   ta.dispatchEvent(new Event("input"));
 }
@@ -386,6 +390,7 @@ function palUpdate() {
     palRender(skills.slice(0, 14));
     return;
   }
+  if (pathArgInfo(v)) { pathPalette(); return; }   // /download /upload 路径参数:输入即出候选
   const at = v.match(/(^|\s)@(\S*)$/);
   if (at) { filePalette(at[2]); return; }
   palClose();
@@ -394,7 +399,9 @@ let palFileSeq = 0;
 async function filePalette(tok) {
   const s = curSession();
   const seq = ++palFileSeq;
-  const q = ((s && s.cwd) || "~") + "/" + (tok || "");
+  // 令牌以 / 或 ~ 开头 = 绝对路径原样传;拼 cwd 会得到 ~//Users/... 这类废路径,dir-hint 只能在 home 里模糊兜底
+  const t0 = tok || "";
+  const q = t0.startsWith("/") || t0.startsWith("~") ? t0 : ((s && s.cwd) || "~") + "/" + t0;
   try {
     const j = await (await fetch("/api/dir-hint?q=" + encodeURIComponent(q))).json();
     if (seq !== palFileSeq || !j.ok) return;
@@ -407,6 +414,79 @@ async function filePalette(tok) {
     palRender(items);
   } catch { palClose(); }
 }
+/* ---- /download /upload 路径参数补全(输入即出,免按 Tab) ----
+   download 第参远端、第二参本地,upload 相反;远端走 /api/ssh/complete(经复用通道,
+   相对路径按远端主目录,与 scp 同语义),本地走 /api/dir-hint(会话目录起)。
+   唯一目录候选自动下钻补 /;唯一文件候选把补全段置为选区——继续输入即覆盖,
+   Enter 原样带上发送,看起来就是路径自己展开了。 */
+function pathArgInfo(v) {
+  const m = v.match(/^\/(download|upload)\s+([\s\S]*)$/);
+  if (!m || m[2].includes("\n") || m[2].includes("\"")) return null;   // 带引号的路径(含空格)不补
+  const toks = m[2].split(/\s+/);
+  const typing = toks[toks.length - 1] || "";
+  const idx = toks.length - 1;
+  const kind = m[1] === "download" ? (idx === 0 ? "remote" : idx === 1 ? "local" : "")
+                                   : (idx === 0 ? "local" : idx === 1 ? "remote" : "");
+  return kind ? { kind, typing } : null;
+}
+let palPathSeq = 0;
+async function pathPalette() {
+  const ta = palHost();
+  if (ta !== $("input")) { palClose(); return; }   // 编辑重发编辑器内不出路径面板(顺手关掉残留)
+  const info = pathArgInfo(ta.value);
+  const cur0 = sshCur();
+  if (!info || (info.kind === "remote" && !cur0)) { palClose(); return; }
+  const seq = ++palPathSeq;
+  let items = [];
+  if (info.kind === "local") {
+    const s = curSession();
+    try {
+      // 绝对路径令牌原样查(拼 cwd 会废,见 filePalette 同款注释);相对路径按会话目录起
+      const q = info.typing.startsWith("/") || info.typing.startsWith("~")
+        ? info.typing : ((s && s.cwd) || "~") + "/" + info.typing;
+      const j = await (await fetch("/api/dir-hint?q=" + encodeURIComponent(q))).json();
+      if (seq !== palPathSeq) return;
+      if (!j.ok) { palClose(); return; }
+      const parent = j.parent || "";
+      items = (j.items || []).map(x => ({
+        insert: String(x.name).startsWith("/") ? String(x.name) : (parent ? parent + "/" : "") + String(x.name),
+        dir: !!x.dir,
+      }));
+    } catch { return; }
+  } else {
+    try {
+      const j = await (await fetch("/api/ssh/complete?sid=" + encodeURIComponent(cur0.sid) + "&q=" + encodeURIComponent(info.typing))).json();
+      if (seq !== palPathSeq) return;
+      if (!j.ok) { palClose(); return; }
+      items = (j.items || []).map(x => ({ insert: String(x.name), dir: !!x.dir }));
+    } catch { return; }
+  }
+  items = items.slice(0, 12);
+  const cur2 = pathArgInfo(ta.value);   // 网络往返期间输入可能已变,重对一次再落
+  if (!cur2 || cur2.kind !== info.kind || cur2.typing !== info.typing) return;
+  if (items.length === 1 && (items[0].insert === info.typing || items[0].insert + "/" === info.typing)) {
+    palClose(); return;   // 唯一候选恰是已输完整的路径:不出面板,Enter 原样发送
+  }
+  if (items.length === 1 && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length
+      && items[0].insert !== info.typing && items[0].insert + "/" !== info.typing) {
+    const it = items[0];
+    const add = it.dir ? (it.insert.endsWith("/") ? it.insert : it.insert + "/") : it.insert;
+    const keep = ta.value.length - info.typing.length;
+    const selStart = ta.value.length;
+    ta.value = ta.value.slice(0, keep) + add;
+    if (it.dir) ta.setSelectionRange(ta.value.length, ta.value.length);   // 目录:直接落定,继续下钻
+    else ta.setSelectionRange(selStart, ta.value.length);                 // 文件:补全段选中,续打即覆盖
+    ta.dispatchEvent(new Event("input"));   // 目录下钻链:立即拉下一层候选
+    updateSendBtn(); updatePlaceholder();
+    return;
+  }
+  ddPalActive = 0;
+  palRender(items.map(it => ({
+    kind: "path", insert: it.insert, dir: it.dir,
+    display: it.insert.split("/").filter(Boolean).pop() + (it.dir ? "/" : "") || "/",
+    desc: it.insert, tag: it.dir ? "dir" : "file",
+  })));
+}
 function palKeydown(e) {
   if (!ddPalItems.length) return false;
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -417,6 +497,7 @@ function palKeydown(e) {
   if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.isComposing)) {
     const ta = palHost(), it = ddPalItems[ddPalActive];
     if (it && it.kind === "cmd" && ("/" + it.name) === ta.value.trim()) return false;  // 已输完整命令,交给发送
+    if (it && it.kind === "path" && ta.value.endsWith(it.insert)) return false;       // 路径已输完整,交给发送
     e.preventDefault(); palAccept(ddPalActive); return true;
   }
   if (e.key === "Escape") { e.stopPropagation(); palClose(); return true; }

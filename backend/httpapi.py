@@ -24,7 +24,7 @@ from .permission import PERMISSION_MODES, permission_decision, risk_level, shell
 from .progress import _progress_ctx
 from .prompts import DEFAULT_SYSTEM_PROMPT
 from .provider import load_ccswitch_provider, resolve_context_window
-from .ssh import SSHS, _bad_text, _ssh_spec_from_body, api_ssh_groups_save, api_ssh_hosts_delete, api_ssh_hosts_save, api_ssh_keys_create, api_ssh_keys_delete, api_ssh_keys_list, api_ssh_keys_pub, ssh_scp, ssh_status
+from .ssh import SSHS, _bad_text, _ssh_spec_from_body, api_ssh_groups_save, api_ssh_hosts_delete, api_ssh_hosts_save, api_ssh_keys_create, api_ssh_keys_delete, api_ssh_keys_list, api_ssh_keys_pub, ssh_complete, ssh_scp, ssh_status
 from .term import TERMS
 from .textutil import _trunc, dir_hints, fix_arguments, strip_emoji
 from .tools_builtin import TOOL_DEFS, TOOL_IMPL, tool_list_dir, tool_read_file
@@ -36,6 +36,25 @@ ops_register()
 
 # ---- split body (verify: 勿动本行以上) ----
 # ---------------------------- HTTP 服务 ----------------------------
+def _writable_dir(d):
+    """目录实探可写:建-删探测文件。os.access 在 macOS 只读根目录会误报可写(DAC 层面可写,
+    文件系统层面只读),download 落点判断必须实探。"""
+    if not d or not os.path.isdir(d):
+        return False
+    probe = os.path.join(d, ".ff-write-probe")
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        os.close(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -236,6 +255,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "data": text, "exited": s.exited, "label": s.label, "written": w})
         elif path == "/api/ssh/status":
             self._json(ssh_status())
+        elif path == "/api/ssh/complete":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            s = SSHS.get((qs.get("sid") or [""])[0])
+            if not s:
+                self._json({"ok": False, "error": "SSH 会话不存在,先 /ssh 连接"}, 404)
+            else:
+                q_raw = (qs.get("q") or [""])[0]
+                if _bad_text(q_raw) or len(q_raw) > 512:
+                    self._json({"ok": False, "error": "补全前缀不能包含控制字符且不超过 512 字"}, 400)
+                else:
+                    self._json(ssh_complete(s, q_raw))
         elif path == "/api/fs/list":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             self._json(tool_list_dir({"path": (qs.get("path") or ["~"])[0]}))
@@ -463,13 +493,27 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "远端路径不能为空且不能包含控制字符"}, 400)
                     return
                 dest_arg = str(body.get("dest") or "").strip()
-                base = os.path.expanduser(dest_arg or body.get("cwd") or "~")
-                # 兜底:默认目录必须可写(cwd 可能是 "/" 这类只读位置,落在根上会报 Read-only file system)
-                if not dest_arg and (base in ("/", "") or not os.path.isdir(base) or not os.access(base, os.W_OK)):
-                    base = os.path.expanduser("~")
                 name = remote.rstrip("/").rsplit("/", 1)[-1] or "download"
-                dest = os.path.join(base, name) if (not dest_arg or dest_arg.endswith("/")
-                                                    or os.path.isdir(base)) else base
+                if dest_arg:
+                    # 显式 dest:相对路径按会话目录解析(此前按服务进程 cwd 落点,进程在 / 时
+                    # 直接拼出 /xxx 触发 Read-only file system)
+                    d = os.path.expanduser(dest_arg)
+                    if not d.startswith("/"):
+                        d = os.path.join(os.path.expanduser(body.get("cwd") or "~"), d)
+                    d = os.path.abspath(d)
+                    want_dir = dest_arg.endswith("/") or os.path.isdir(d)
+                    dest = os.path.join(d, name) if want_dir else d
+                    dd = d if want_dir else (os.path.dirname(dest) or "/")
+                    if not _writable_dir(dd):
+                        self._json({"ok": False, "error": "本地目标目录不可写:%s;省略本地目标参数将自动存到用户主目录" % dd}, 400)
+                        return
+                else:
+                    base = os.path.expanduser(body.get("cwd") or "~")
+                    # 兜底:默认目录必须可写(cwd 可能是 "/" 这类只读位置;os.access 在 macOS
+                    # 根目录会误报可写,实探建删探测文件为准)
+                    if base in ("/", "") or not _writable_dir(base):
+                        base = os.path.expanduser("~")
+                    dest = os.path.join(base, name)
                 dest = os.path.abspath(dest)
                 if os.path.exists(dest) and not body.get("overwrite"):
                     self._json({"ok": False, "error": "目标已存在:%s(需覆盖请在命令末尾加 force)" % dest}, 409)

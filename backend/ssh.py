@@ -5,6 +5,7 @@ import glob
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -151,6 +152,42 @@ def ssh_scp(session, direction, remote, local, timeout=120):
             err += ";认证可能已过期,请先在 SSH 终端重新 /ssh 连接一次"
         return {"ok": False, "error": "scp 失败: " + err, "ms": ms}
     return {"ok": True, "ms": ms}
+
+
+def ssh_complete(session, prefix, timeout=8):
+    """远端路径补全:经复用通道跑固定 sh 脚本(前缀经 shlex.quote 注入安全;BatchMode 免交互)。
+    相对路径按远端主目录解析——与 scp 的语义一致;返回项以 / 结尾表示目录。"""
+    _cm_dir()
+    cpath = os.path.join(CM_DIR, session.control_key)
+    spec = session.spec
+    script = ("p=" + shlex.quote(prefix) + "; "
+              "case $p in */*) d=${p%/*}; b=${p##*/};; *) d=.; b=$p;; esac; "
+              "[ -n \"$d\" ] || d=/; cd \"$d\" 2>/dev/null || exit 0; "
+              "for f in \"$b\"*; do [ -e \"$f\" ] || continue; "
+              "if [ \"$d\" = . ]; then o=$f; else o=${d%/}/$f; fi; "
+              "[ -d \"$f\" ] && o=$o/; printf '%s\\n' \"$o\"; done; exit 0")
+    argv = ["/usr/bin/ssh"] + _ssh_common_opts(spec, cpath) + ["-o", "BatchMode=yes"]
+    if spec.get("port"):
+        argv += ["-p", str(int(spec["port"]))]
+    argv += ["%s@%s" % (spec["user"], spec["host"]), script]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "补全超时(%d 秒)" % timeout}
+    except OSError as e:
+        return {"ok": False, "error": "无法启动 ssh 补全: %s" % e}
+    if p.returncode != 0:
+        el = [l for l in (p.stderr or "").splitlines() if l.strip()]
+        hint = el[-1] if el else "exit %d" % p.returncode
+        if "Permission denied" in (p.stderr or "") or "askpass" in (p.stderr or ""):
+            hint += ";复用通道已失效,请先在对应 SSH 终端重新 /ssh 连接一次"
+        return {"ok": False, "error": "补全失败: %s" % hint[:160]}
+    items = []
+    for ln in (p.stdout or "").splitlines():
+        s = ln.strip()
+        if s and len(items) < 60:
+            items.append({"name": s, "dir": s.endswith("/")})
+    return {"ok": True, "items": items}
 
 
 def ssh_status():
