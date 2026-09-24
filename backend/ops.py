@@ -24,6 +24,9 @@ from .tools_builtin import TOOL_DEFS, TOOL_IMPL
 
 # sid -> 已消费到的字节序号(buffer_slice 的 next_offset);ops_read 是唯一写者
 OPS_CURSORS = {}
+# sid -> True:上次 ops_read 判定该终端仍未收尾(长驻命令占着前台);quiet 收尾/终端退出即解除。
+# ops_type/ops_broadcast 据此拒绝写入——新命令会落进运行中进程的 stdin 永不执行
+OPS_BUSY = {}
 _OPS_SNAP_BYTES = 500     # 系统块尾部快照取最后 500 字节
 _OPS_SNAP_LINES = 15      # 快照只保留最后 15 行
 _OPS_QUIET_S = 1.2        # quiet 模式:输出静默超过该秒数即收
@@ -67,6 +70,8 @@ OPS_TOOL_DEFS = [
                 'wait="follow":盯输出直到新增文本命中 expect 正则(如 "ERROR|Traceback")或超时,'
                 "适合 tail -f / journalctl -f 等长驻命令。timeout_s 在 quiet 限 1-20(默认 8)、"
                 "follow 限 1-60(默认 30),到点返回 timed_out=true。终端断开后仍可读尾部(alive=false)。"
+                "返回 busy=true 表示该终端仍未收尾(长驻命令占着前台):不得向它放置新命令,"
+                "先 wait=\"quiet\" 非超时收尾解锁,长驻命令请用户在该终端按 Ctrl-C 中断。"
             ),
             "parameters": {
                 "type": "object",
@@ -222,6 +227,15 @@ def tool_ops_type(a):
     if ses.exited is not None:
         return {"ok": False, "error": ("终端 %s(%s)已断开:请提示用户重新 /ssh 连接后再试,"
                                        "或改用清单里的其他在线终端" % (label, sid))}
+    if OPS_BUSY.get(sid):
+        # 上次 ops_read 到点未收/盯守命中:终端疑似仍被长驻命令占着,写入会进它的 stdin 永不执行。
+        # 文案先给零摩擦解锁(quiet 收尾——命令只是慢、已结束的情形),真长驻才请用户按 Ctrl-C,避免骚扰用户
+        return {"ok": False, "error": (
+            "终端 %s(%s)上一条命令未收尾(上次 ops_read 到点未收或盯守命中,疑似 tail -f 类长驻仍在跑),"
+            '现在放新命令会写进运行中进程的输入流而不执行。请先:(1) 调 ops_read(terminal="%s", wait="quiet"),'
+            "非超时收尾即解锁(命令只是慢、已结束的情形,无需打扰用户);(2) 确认是长驻命令(tail -f / "
+            "journalctl -f 等)则用正文请用户在该终端按 Ctrl-C 中断,收到 [Ops] 中断触发后先 "
+            'ops_read(wait="quiet") 确认提示符回来,再放置新命令' % (label, sid, label))}
     # 写前快照:首读含命令回显;游标推进交给 ops_read
     with ses.lock:
         OPS_CURSORS[sid] = ses.written
@@ -299,9 +313,18 @@ def tool_ops_read(a):
                 break
             time.sleep(_OPS_POLL_S)
     OPS_CURSORS[sid] = cur  # 成功才写回游标,失败/异常不推进
+    # 忙闲转移(前端只认返回的 busy 字段,不自行推导):终端退出→解除;到点未收/盯守命中/截断→视为仍被
+    # 长驻命令占用(timed_out 只说明"到点未收尾",不必然还在跑——保守拒绝由后续 quiet 收尾自愈,至多多读一次);
+    # quiet 静默收尾→解除;now 是窥读,不改判定
+    if ses.exited is not None:
+        OPS_BUSY.pop(sid, None)
+    elif timed_out or matched or truncated:
+        OPS_BUSY[sid] = True
+    elif wait == "quiet":
+        OPS_BUSY.pop(sid, None)
     return {"ok": True, "sid": sid, "label": label, "text": "".join(parts),
             "timed_out": timed_out, "alive": ses.exited is None, "truncated": truncated,
-            "matched": matched}
+            "matched": matched, "wait": wait, "busy": bool(OPS_BUSY.get(sid))}
 
 
 def tool_ops_broadcast(a):
@@ -327,6 +350,10 @@ def tool_ops_broadcast(a):
             continue
         if ses.exited is not None:
             errs.append("终端 %s(%s)已断开:请提示用户重新 /ssh 连接" % (label, sid))
+            continue
+        if OPS_BUSY.get(sid):
+            errs.append("终端 %s(%s)上一条命令未收尾(长驻占用)已跳过:先 ops_read(wait=\"quiet\") "
+                        "非超时收尾解锁;长驻命令请用户在该终端按 Ctrl-C 中断" % (label, sid))
             continue
         g = _term_group(ses)
         if g in seen_grp:
@@ -564,7 +591,8 @@ def _ops_fence(label, text, timed_out=False, alive=True):
     out = ["[Terminal %s +%d lines]" % (label, len(text.split("\n")) if text else 0),
            fence, text, fence]
     if timed_out:
-        out.append("等待超时,输出可能未完,长驻命令请用正文问用户是否继续等待")
+        out.append("等待超时,输出可能未完:该终端未收尾,不要直接放置新命令(会写进长驻进程的输入流不执行);"
+                   "要收掉它请用正文让用户在该终端按 Ctrl-C,要继续盯则 ops_read(wait=\"follow\", expect=...)")
     if not alive:
         out.append("终端已断开")
     return "\n".join(out)
@@ -622,6 +650,9 @@ def build_ops_system_block():
         '收到形如「[Ops] 已在 <label> 回车执行」的消息后,必须立即调用 ops_read(terminal=该终端, wait="quiet") 读取执行输出增量',
         "ops_read 超时(timed_out)说明命令长驻或暂无输出:tail -f / journalctl -f 等盯日志场景改用 wait=\"follow\" 带 expect 正则盯到命中;"
         "仍收不住就用正文问用户是否继续等待,答继续就再调 ops_read(游标已推进不会重复),不要空转重试",
+        "长驻命令收尾纪律:busy=true(超时/盯守命中/截断)的终端绝不放置新命令——文本会写进长驻进程的输入流永不执行;"
+        "先 ops_read(wait=\"quiet\") 非超时收尾解锁;确需中断(tail -f 等)用正文请用户在该终端按 Ctrl-C,"
+        "收到 [Ops] 中断触发后 quiet 读确认提示符回来再继续",
         "排障开局先摸底:对本轮涉及的每台主机各调一次 ops_facts 采集画像(只读、无需回车);清单里已带画像摘要的主机可直接用。"
         "仍不清楚各终端身份/网络时,再逐台 ip a(用户只需回车);信息不足时用正文问用户,不要瞎猜",
         "需要在多台主机上跑同一条命令对比结果(找不一致的那台)时,用 ops_broadcast 一次放进多台终端,用户逐台回车后逐台 ops_read 对比差异",
@@ -650,6 +681,10 @@ def ops_result_text(name, r):
             text += "\n已命中 expect 模式,输出到此为止;命中内容已在上方,继续分析下一步"
         if r.get("truncated"):
             text += "\n输出超过单次读取上限已截断;继续调用 ops_read 可读取剩余增量(游标已推进)"
+        if r.get("busy"):
+            text += ("\n该终端仍未收尾(命令疑似还在运行,如 tail -f):不要向它放置新命令;"
+                     '先 ops_read(wait="quiet") 非超时收尾解锁;长驻命令请用户在该终端按 Ctrl-C,'
+                     "收到 [Ops] 中断触发后再 quiet 读确认提示符回来")
         return text
     if name == "ops_broadcast":
         if r.get("ok"):

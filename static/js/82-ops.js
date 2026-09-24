@@ -3,7 +3,7 @@
 // ops_type 工具结果(ok/sid/label)把「回车」布防到指定终端;用户真在那个终端按回车时触发:
 // 摘下布防、记录 lastRead、给布防所属的 ops 会话发引导消息,让助手立刻 ops_read 读增量并继续。
 // armed 持久化到各 owner 会话对象的 opsArmed([{sid,label}]),刷新后由 opsInit 还原。
-const OPS = { armed: new Map(), lastRead: null };   // armed: 终端 sid → {sid,label,owner};owner = ops 会话 id
+const OPS = { armed: new Map(), busy: new Map(), lastRead: null };   // armed: 终端 sid → {sid,label,owner};owner = ops 会话 id;busy: 同构,盯守中(长驻未收尾)的终端
 
 /* 是否还有等待回车的布防(任意会话) */
 function opsAnyActive() { return OPS.armed.size > 0; }
@@ -27,6 +27,17 @@ function opsArmFromResult(r, session) {
   if (session.id === curId && first) sshSwitchToSid(first.sid);
 }
 
+/* ops_read 工具结果落地:按后端权威 busy 字段登记/解除盯守(busy=true 的终端里用户按 Ctrl-C 会通知助手)。
+   只认 r.busy 不自行推导,防前后端两套规则漂移;r.alive===false 兜底清除(终端已断) */
+function opsWatchFromResult(r, session) {
+  if (!r || !r.ok || !r.sid || !session) return;
+  const busy = !!r.busy && r.alive !== false;
+  const had = OPS.busy.has(r.sid);
+  if (busy) OPS.busy.set(r.sid, { sid: r.sid, label: r.label || r.sid, owner: session.id });
+  else OPS.busy.delete(r.sid);
+  if (busy !== had) { opsPersist(); opsRenderBar(); }
+}
+
 /* 终端收到回车键(80-ssh 在键盘路径调用;sdk 自动填密码等写入不走这里,天然不误触发) */
 function opsOnEnter(ses) {
   if (!ses) return;
@@ -39,17 +50,38 @@ function opsOnEnter(ses) {
   opsTrigger(sessions.find(x => x.id === a.owner) || null, a.label);
 }
 
-/* 给 owner 会话发引导消息,让助手立即读取该终端的执行输出增量并继续 */
-async function opsTrigger(owner, label) {
-  if (!owner) return;   // 布防归属会话已被删除:无处可发
-  const text = `[Ops] 已在 ${label} 回车执行。请立即调用 ops_read(terminal="${label}", wait="quiet") 读取该终端的执行输出增量并继续。`;
-  // owner 回合压缩中:sendText 会拒发(压缩完成整体替换消息,期间发送会被吞)——2s 轮询等它结束,上限 30 次(60s)
+/* 终端收到 Ctrl-C(80-ssh 在键盘路径调用;vim 等备用屏内是应用按键,不触发):盯守中的终端 = 人审中断,
+   通知助手立即读取中断后输出、确认提示符回归。不在盯守中的终端是普通 Ctrl-C,直接放行 */
+function opsOnInterrupt(ses) {
+  if (!ses) return;
+  const w = OPS.busy.get(ses.sid);
+  if (!w) return;   // 该终端不在盯守:普通 Ctrl-C,直接放行
+  OPS.busy.delete(ses.sid);
+  opsPersist();
+  opsRenderBar();
+  opsSendGuided(sessions.find(x => x.id === w.owner) || null,
+    `[Ops] 已在 ${w.label} 按 Ctrl-C 中断。请立即调用 ops_read(terminal="${w.label}", wait="quiet") `
+    + `确认提示符已回来(非超时收尾)后继续;若仍超时说明命令还在,可再次请用户按 Ctrl-C。`,
+    "ops: " + w.label + " 已按 Ctrl-C 中断,但等待会话压缩完成超时——可用 /vvv 手动读取输出后继续");
+}
+
+/* 给 owner 会话发引导消息的共通路径。owner 回合压缩中:sendText 会拒发(压缩完成整体替换消息,
+   期间发送会被吞)——2s 轮询等它结束,上限 30 次(60s),超时降级 toast */
+async function opsSendGuided(owner, text, failToast) {
+  if (!owner) return;   // 布防/盯守归属会话已被删除:无处可发
   for (let i = 0; i < 30; i++) {
     const t = LIVE_TURNS.get(owner.id);
     if (!(t && t.compacting)) { await sendText(text, true, null, null, { session: owner, ops: true }); return; }
     await new Promise(r => setTimeout(r, 2000));
   }
-  toast("ops: " + label + " 已回车执行,但等待会话压缩完成超时——可用 /vvv 手动读取输出后继续", "warn");
+  toast(failToast, "warn");
+}
+
+/* 给 owner 会话发引导消息,让助手立即读取该终端的执行输出增量并继续 */
+async function opsTrigger(owner, label) {
+  await opsSendGuided(owner,
+    `[Ops] 已在 ${label} 回车执行。请立即调用 ops_read(terminal="${label}", wait="quiet") 读取该终端的执行输出增量并继续。`,
+    "ops: " + label + " 已回车执行,但等待会话压缩完成超时——可用 /vvv 手动读取输出后继续");
 }
 
 /* 撤回布防命令在远端输入行里的字符(^U 清行;vim 等全屏程序内不发,按键会打进程序) */
@@ -79,6 +111,10 @@ function opsRenderBar() {
     const ses = sshSessions.find(x => x.sid === a.sid);
     if (!ses || !ses.alive) { OPS.armed.delete(a.sid); pruned = true; }
   }
+  for (const b of Array.from(OPS.busy.values())) {
+    const ses = sshSessions.find(x => x.sid === b.sid);
+    if (!ses || !ses.alive) { OPS.busy.delete(b.sid); pruned = true; }
+  }
   if (pruned) opsPersist();
   el.textContent = "";
   const chips = [];
@@ -90,6 +126,19 @@ function opsRenderBar() {
     chip.innerHTML = `<span class="lbl">ops</span><span class="tx"></span><button title="取消此等待">x</button>`;
     chip.querySelector(".tx").textContent = "等待回车 · " + a.label;
     chip.querySelector("button").onclick = () => { OPS.armed.delete(a.sid); opsWithdrawLine(sshSessions.find(x => x.sid === a.sid) || null); opsPersist(); opsRenderBar(); };
+    chips.push(chip);
+  }
+  // 盯守 chip:长驻命令疑似仍在运行,按 Ctrl-C 通知助手中断(无取消按钮——背着助手摘盯守会把助手晾在补救半路;
+  // 同机多开 label 可能撞名,撞名时带 sid 消歧)
+  const busyList = Array.from(OPS.busy.values());
+  for (const b of busyList) {
+    if (b.owner !== curId) continue;
+    const chip = document.createElement("span");
+    chip.className = "queued-chip";
+    chip.title = "该终端有命令疑似仍在运行(长驻);在其中按 Ctrl-C 会通知助手中断并继续";
+    chip.innerHTML = `<span class="lbl">ops</span><span class="tx"></span>`;
+    const dup = busyList.filter(x => x.label === b.label).length > 1;
+    chip.querySelector(".tx").textContent = "长驻命令 · " + b.label + (dup ? " · " + b.sid : "");
     chips.push(chip);
   }
   // 读取输出中:lastRead 归属当前会话且其回合仍在生成(回合结束提示条自行消失)
@@ -106,13 +155,19 @@ function opsRenderBar() {
   for (const c of chips) el.appendChild(c);
 }
 
-/* armed 全量重写到各 owner 会话的 opsArmed([{sid,label}]):先清所有会话再按 owner 写,防陈旧残留 */
+/* armed/busy 全量重写到各 owner 会话的 opsArmed/opsBusy([{sid,label}]):先清所有会话再按 owner 写,防陈旧残留。
+   busy 必须持久化——后端 OPS_BUSY 守卫跨刷新仍在,盯守丢了助手就会等一个永不到来的 Ctrl-C 触发 */
 function opsPersist() {
-  for (const s of sessions) delete s.opsArmed;
+  for (const s of sessions) { delete s.opsArmed; delete s.opsBusy; }
   for (const a of OPS.armed.values()) {
     const s = sessions.find(x => x.id === a.owner);
     if (!s) continue;   // 归属会话已删除:丢弃该布防
     (s.opsArmed = s.opsArmed || []).push({ sid: a.sid, label: a.label });
+  }
+  for (const b of OPS.busy.values()) {
+    const s = sessions.find(x => x.id === b.owner);
+    if (!s) continue;   // 归属会话已删除:丢弃该盯守
+    (s.opsBusy = s.opsBusy || []).push({ sid: b.sid, label: b.label });
   }
   persist();
 }
@@ -125,11 +180,13 @@ function opsFollowArmed() {
   if (mine) sshSwitchToSid(mine.sid, true);
 }
 
-/* 启动还原(boot 在 sshReattach 后调用):按各会话落盘的 opsArmed 重建运行时布防表 */
+/* 启动还原(boot 在 sshReattach 后调用):按各会话落盘的 opsArmed/opsBusy 重建运行时布防与盯守表 */
 function opsInit() {
   OPS.armed.clear();
+  OPS.busy.clear();
   for (const s of sessions) {
     for (const t of (s.opsArmed || [])) OPS.armed.set(t.sid, { sid: t.sid, label: t.label, owner: s.id });
+    for (const t of (s.opsBusy || [])) OPS.busy.set(t.sid, { sid: t.sid, label: t.label, owner: s.id });
   }
   opsRenderBar();
   opsFollowArmed();

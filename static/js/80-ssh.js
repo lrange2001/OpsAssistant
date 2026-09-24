@@ -266,6 +266,7 @@ function sshSend(data) {
   if (!c) return;
   c.lastKey = Date.now();
   if (data === "\r" && !c.state.alt) opsOnEnter(c);   // ops 布防中:提示符下的回车= 人审执行(自动密码走 sshWriteTo 不经此;备用屏里 vim 换行等回车是应用按键,不触发)
+  if (data === "\x03" && !c.state.alt) opsOnInterrupt(c);   // ops 盯守中:提示符下的 Ctrl-C = 人审中断,通知助手读取(备用屏里 vim 的 Ctrl-C 是应用按键,不触发)
   sshWriteTo(c, data);
   if (!c.pollBusy) { if (c.timer) clearTimeout(c.timer); c.timer = setTimeout(() => { c.timer = null; sshPoll(c); }, 40); }  // 40ms 后抓回显
 }

@@ -658,6 +658,65 @@ async function uiTests() {
     chk(!bar3.shown && bar3.chips.length === 0, "全部取消后 ops-bar 应隐藏,实际: " + JSON.stringify(bar3));
   });
 
+  /* OP-10 长驻盯守与 Ctrl-C 中断:ops_read busy 登记chip/持久化,终端 Ctrl-C 触发 [Ops] 中断,盯守外不误触发 */
+  await t(page, "OP-10 忙盯守:busy 登记chip/持久化,Ctrl-C 触发 [Ops] 中断且不误触发", async () => {
+    ownerId = await page.evaluate(() => curId);
+    // 一轮 ops_read 到点未收(timed_out 且后端权威 busy=true):应登记盯守
+    const id = "call-op-rd-" + (++roundSeq);
+    await page.evaluate((id) => {
+      window.__chatScript = async (push, close) => {
+        push({ type: "delta", content: "命令还在跑,先盯输出。" });
+        push({ type: "tool_call", id, name: "ops_read", arguments: { terminal: "ops@10.0.0.8", wait: "quiet", timeout_s: 8 } });
+        push({ type: "tool_result", id, name: "ops_read",
+          result: { ok: true, sid: "s1-mock", label: "ops@10.0.0.8", text: "TRK-1\nTRK-2", timed_out: true, alive: true, wait: "quiet", busy: true, truncated: false, matched: false } });
+        push({ type: "done", reason: "stop", usage: { in: 30, out: 12 }, append_messages: [] });
+        close();
+      };
+    }, id);
+    await sendUserMsg(page, input, "读一下输出");
+    await page.evaluate(() => { window.__chatScript = null; });
+    let bar = await opsBarState(page);
+    let busyArr = await page.evaluate(() => [...OPS.busy.values()].map(b => ({ sid: b.sid, label: b.label, owner: b.owner })));
+    chk(busyArr.length === 1 && busyArr[0].sid === "s1-mock" && busyArr[0].owner === ownerId,
+        "ops_read busy=true 应登记盯守 s1-mock 且归属当前会话,实际: " + JSON.stringify(busyArr));
+    const busyChip = bar.chips.find(c => c.tx.indexOf("长驻命令") === 0);
+    chk(!!busyChip && busyChip.tx.includes("ops@10.0.0.8") && !busyChip.hasX,
+        "ops-bar 应出现长驻命令 chip(带 label 无 x 按钮),实际: " + JSON.stringify(bar.chips));
+    const saved = await page.evaluate((owner) => {
+      const s = sessions.find(x => x.id === owner);
+      return (s && s.opsBusy) || [];
+    }, ownerId);
+    chk(saved.some(x => x.sid === "s1-mock"), "盯守应持久化到 owner 会话 opsBusy,实际: " + JSON.stringify(saved));
+
+    // 盯守中的终端按 Ctrl-C:人审中断,[Ops] 中断触发消息发出,\x03 原样转发终端
+    // (ops_read 回合不自动切视图——键盘漏斗作用于面板正在显示的终端,先把视图切回 s1-mock)
+    await page.evaluate(() => sshSwitchToSid("s1-mock"));
+    const n0 = await page.evaluate(() => window.__chatBodies.length);
+    const w0len = await page.evaluate(() => (window.__ssh.bySid("s1-mock") || { writes: [] }).writes.join("").length);
+    await page.focus("#ssh-hidden");
+    await page.keyboard.press("Control+c");
+    const body = await waitNewBody(page, n0);
+    const msgs = body.messages || [];
+    const last = msgs[msgs.length - 1] || {};
+    chk(last.role === "user" && /\[Ops\] 已在 ops@10\.0\.0\.8 按 Ctrl-C 中断/.test(String(last.content || "")),
+        "messages 末条 user 应含 [Ops] 中断触发文本,实际: " + JSON.stringify(last).slice(0, 200));
+    chk(/ops_read\(terminal="ops@10\.0\.0\.8", wait="quiet"\)/.test(String(last.content || "")),
+        "中断触发文本应引导 ops_read quiet 确认提示符,实际: " + String(last.content).slice(0, 160));
+    const sent = await page.evaluate(w0 => (window.__ssh.bySid("s1-mock") || { writes: [] }).writes.join("").slice(w0), w0len);
+    chk(sent.includes("\x03"), "Ctrl-C 应原样经 /api/ssh/write 转发到终端,实际: " + JSON.stringify(sent.slice(-40)));
+    bar = await opsBarState(page);
+    busyArr = await page.evaluate(() => [...OPS.busy.values()].map(b => b.sid));
+    chk(busyArr.length === 0 && !bar.chips.some(c => c.tx.indexOf("长驻命令") === 0),
+        "中断后盯守清空、长驻 chip 消失,实际: " + JSON.stringify({ busyArr, chips: bar.chips }));
+
+    // 盯守外的普通 Ctrl-C:不新发消息(不误触发)
+    const n1 = await page.evaluate(() => window.__chatBodies.length);
+    await page.keyboard.press("Control+c");
+    await sleep(300);
+    const n2 = await page.evaluate(() => window.__chatBodies.length);
+    chk(n2 === n1, "盯守外的普通 Ctrl-C 不得新发消息(" + n1 + " -> " + n2 + ")");
+  });
+
   await page.close();
   await ctx.close();
   await browser.close().catch(() => {});
@@ -681,7 +740,7 @@ const PY = [
   "import json, sys, time",
   "sys.path.insert(0, '.')",
   "from backend.term import TERMS",
-  "from backend.ops import (OPS_CURSORS, _facts_parse, _ops_fence, check_ops_command, ops_plan_gate,",
+  "from backend.ops import (OPS_BUSY, OPS_CURSORS, _facts_parse, _ops_fence, check_ops_command, ops_plan_gate,",
   "                         ops_register, tool_ops_broadcast, tool_ops_read, tool_ops_type)",
   "from backend.tools_builtin import TOOL_DEFS, TOOL_IMPL",
   "",
@@ -759,12 +818,28 @@ const PY = [
   "     rq2.get('ok') is True and 'OPSD-8' in rq2.get('text', '') and 'OPSC-6' not in rq2.get('text', ''),",
   "     (rq2.get('text') or '')[-160:])",
   "",
-  "# D4 超时:timeout_s=1 时 deadline(1s)必先于静默窗(1.2s),timed_out 恒真",
+  "# D4 超时:timeout_s=1 时 deadline(1s)必先于静默窗(1.2s),timed_out 恒真;超时即忙置位,",
+  "# ops_type 被忙守卫拒绝——长驻命令(tail -f 类)占着前台,新命令会写进它的 stdin 永不执行",
   "tool_ops_type({'command': 'sleep 2', 'terminal': sid})",
   "ses.write('\\r')",
   "rq = tool_ops_read({'terminal': sid, 'wait': 'quiet', 'timeout_s': 1})",
   "emit('D4: 无输出超时 timed_out=true(timeout_s=1)', rq.get('ok') is True and rq.get('timed_out') is True, rq)",
   "emit('D4: 超时返回仍带回显文本', 'sleep 2' in (rq.get('text') or ''), (rq.get('text') or '')[-160:])",
+  "emit('D4: 超时读置忙(wait/busy 字段与 OPS_BUSY 一致)',",
+  "     rq.get('wait') == 'quiet' and rq.get('busy') is True and OPS_BUSY.get(sid) is True, rq)",
+  "rbusy = tool_ops_type({'command': 'echo NG-BUSY', 'terminal': sid})",
+  "emit('D4: 忙终端 ops_type 被拒且文案给解锁路径(Ctrl-C 与 quiet)',",
+  "     rbusy.get('ok') is False and 'Ctrl-C' in (rbusy.get('error') or '') and 'quiet' in (rbusy.get('error') or ''), rbusy)",
+  "# sleep 2 已到点(回车后已耗 ~1s 读 + 断言),再等余量后 quiet 收尾即解锁——命令只是慢的零摩擦路径",
+  "time.sleep(1.6)",
+  "rq3 = tool_ops_read({'terminal': sid, 'wait': 'quiet', 'timeout_s': 6})",
+  "emit('D4: 命令结束后 quiet 收尾解锁(busy=false 且 OPS_BUSY 清除)',",
+  "     rq3.get('ok') is True and rq3.get('timed_out') is False and rq3.get('busy') is False and OPS_BUSY.get(sid) is None, rq3)",
+  "rok = tool_ops_type({'command': 'echo OK-UNLOCK', 'terminal': sid})",
+  "emit('D4: 解锁后 ops_type 恢复放行', rok.get('ok') is True, rok)",
+  "ses.write('\\r')",
+  "time.sleep(0.6)",
+  "tool_ops_read({'terminal': sid, 'wait': 'now'})",
   "# D4 滴流:0.4s 间隔压过 1.2s 静默窗,2s 到点 timed_out",
   "tool_ops_type({'command': 'for i in 1 2 3 4 5 6 7 8; do echo TRK-$i; sleep 0.4; done', 'terminal': sid})",
   "ses.write('\\r')",
@@ -772,6 +847,10 @@ const PY = [
   "emit('D4: 滴流输出压过静默窗,timed_out 且带回首批输出',",
   "     rq.get('ok') is True and rq.get('timed_out') is True and 'TRK-1' in rq.get('text', ''),",
   "     (rq.get('text') or '')[-160:])",
+  "# 滴流全程 ~3.2s,已耗 2s 读;等它跑完 quiet 收尾解锁(清场,后续用例不受忙守卫影响)",
+  "time.sleep(1.8)",
+  "rq4 = tool_ops_read({'terminal': sid, 'wait': 'quiet', 'timeout_s': 6})",
+  "emit('D4: 滴流结束后 quiet 收尾解锁', rq4.get('timed_out') is False and OPS_BUSY.get(sid) is None, rq4)",
   "",
   "# D5 命令静态校验",
   "for cmd, why in [('', '空命令'), ('   ', '空白命令'), ('echo a\\rb', '含回车符'), ('echo a\\necho b', '多行且无 heredoc'), (None, '非字符串')]:",
@@ -815,9 +894,11 @@ const PY = [
   "err = r.get('error') or ''",
   "emit('D8: 断开后 ops_type 拒绝且文案含重连指引',",
   "     r.get('ok') is False and ('重新' in err) and ('/ssh' in err or '连接' in err), r)",
+  "OPS_BUSY[sid] = True   # 忙标记随终端断开解除:退出读兜底 pop(断开后读尾部的场景)",
   "rr = tool_ops_read({'terminal': sid, 'wait': 'now'})",
   "emit('D8: 断开后 ops_read 仍 ok 且 alive=false',",
   "     rr.get('ok') is True and rr.get('alive') is False, rr)",
+  "emit('D8: 终端退出解除忙标记', rr.get('busy') is False and OPS_BUSY.get(sid) is None, rr)",
   "TERMS.dispose(sid)",
   "",
   "# D9 同机分组:相同 (host, port) = 同一台机器(同机多开),不同端口/主机另组",
@@ -884,12 +965,21 @@ const PY = [
   "rf = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': 'FOLLOW-HIT-7', 'timeout_s': 8})",
   "emit('D10: follow 命中即收(matched=true 且含命中行)',",
   "     rf.get('ok') is True and rf.get('matched') is True and 'FOLLOW-HIT-7' in (rf.get('text') or ''), rf)",
+  "emit('D10: 盯守命中即置忙(tail -f 命中后命令通常仍在跑)',",
+  "     rf.get('busy') is True and OPS_BUSY.get(sidF) is True, rf)",
+  "rbz = tool_ops_type({'command': 'echo NG-BUSY-F', 'terminal': sidF})",
+  "emit('D10: 命中后的忙终端 ops_type 被拒',",
+  "     rbz.get('ok') is False and '未收尾' in (rbz.get('error') or ''), rbz)",
+  "# FOLLOW 命令 1.5s 后输出 FOLLOW-TAIL-9 即结束;等结束后 quiet 收尾解锁,再放 PLAIN-1(原流程恢复)",
+  "time.sleep(2.0)",
+  "rs = tool_ops_read({'terminal': sidF, 'wait': 'quiet', 'timeout_s': 6})",
+  "emit('D10: 命令结束 quiet 收尾解锁', rs.get('timed_out') is False and OPS_BUSY.get(sidF) is None, rs)",
   "tool_ops_type({'command': 'echo PLAIN-1', 'terminal': sidF})",
   "sesF.write('\\r')",
   "time.sleep(0.5)",
   "rg = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': 'NEVER-SHOWS', 'timeout_s': 1})",
-  "emit('D10: follow 未命中超时(matched=false 且 timed_out=true,文本带回显)',",
-  "     rg.get('matched') is False and rg.get('timed_out') is True and 'PLAIN-1' in (rg.get('text') or ''), rg)",
+  "emit('D10: follow 未命中超时(matched=false 且 timed_out=true,文本带回显)且再置忙',",
+  "     rg.get('matched') is False and rg.get('timed_out') is True and 'PLAIN-1' in (rg.get('text') or '') and rg.get('busy') is True, rg)",
   "r0 = tool_ops_read({'terminal': sidF, 'wait': 'follow'})",
   "emit('D10: follow 缺 expect 拒绝', r0.get('ok') is False and 'expect' in (r0.get('error') or ''), r0)",
   "rb0 = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': '[unclosed', 'timeout_s': 1})",
@@ -917,10 +1007,18 @@ const PY = [
   "emit('D11: gate 拦已放置后的广播', isinstance(ops_plan_gate({'command': 'x', 'terminals': ['webA']}, {'s-b1'}), str), '')",
   "emit('D11: gate 拦缺 terminals', isinstance(ops_plan_gate({'command': 'x'}, set()), str), '')",
   "emit('D11: gate 放行合法广播', ops_plan_gate({'command': 'x', 'terminals': ['webA']}, set()) is None, '')",
+  "# 忙终端群发:webB 复活但置忙(上一条未收尾)——跳过并说明,webA 照放",
+  "bb2.exited = None",
+  "OPS_BUSY['s-b2'] = True",
+  "rbf = tool_ops_broadcast({'command': 'date', 'terminals': ['webA', 'webB']})",
+  "emit('D11: 忙终端群发跳过并说明(skipped 提未收尾),其余照放',",
+  "     rbf.get('ok') is True and {t.get('sid') for t in rbf.get('targets')} == {'s-b1'} and bool(rbf.get('skipped'))",
+  "     and any('未收尾' in s for s in (rbf.get('skipped') or [])), rbf)",
   "for k in ('s-b1', 's-b2', 's-b3'):",
   "    SSHS.sessions.pop(k, None)",
   "for k in ('s-b1', 's-b2'):",
   "    OPS_CURSORS.pop(k, None)",
+  "OPS_BUSY.pop('s-b2', None)",
   "",
   "# D12 画像解析(_facts_parse 纯函数:固定探测输出 → 紧凑画像行)",
   "sample = '\\n'.join(['#f:os', 'PRETTY_NAME=\"Ubuntu 22.04.3 LTS\"', 'Linux 5.15.0-91-generic',",
