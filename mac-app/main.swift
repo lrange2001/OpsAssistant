@@ -139,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // 不是则重载(限 3 次)。WKWebView 一次失败的加载不会自愈,而壳此前没有任何
     // 重试入口,启动窗口撞上服务抖动就整窗白屏(2026-09-23 线上事故)
     var renderRetries = 0
+    var appLoadedOnce = false   // 应用页是否加载过:区分启动预热与运行期落回空白页
     func retryLoad(_ error: Error) {
         let ns = error as NSError
         guard ns.code != NSURLErrorCancelled, renderRetries < 3 else { return }
@@ -148,7 +149,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
     func verifyRendered() {
-        if webView.url?.absoluteString == "about:blank" { return }   // 预热页不做校验
+        if webView.url?.absoluteString == "about:blank" {
+            // 启动预热阶段不做校验;运行期退回空白页属异常,拉回应用页而不是永久白屏
+            guard appLoadedOnce, renderRetries < 3 else { return }
+            renderRetries += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.webView.load(URLRequest(url: appURL)) }
+            return
+        }
+        appLoadedOnce = true
         webView.evaluateJavaScript("!!document.getElementById('conn-dot')") { [self] r, _ in
             if (r as? Bool) == true { renderRetries = 0; return }
             guard renderRetries < 3 else { return }
@@ -256,10 +264,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         []
     }
 
-    // 外部链接(target=_blank)交给系统浏览器打开
+    // 外部链接(target=_blank)交给系统浏览器打开;
+    // 另拦一切后退/前进导航:SPA 单页无历史可退,而预热 about:blank 留在了历史栈里,
+    // 焦点不在输入框时按 Delete/Backspace、Cmd-[、鼠标侧键都会"后退"到空白页 → 整窗白屏
+    // (2026-09-24 事故:WKWebView 默认把 Backspace 当后退,且这不是导航失败,自愈逻辑不触发)
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+        if navigationAction.navigationType == .backForward {
+            decisionHandler(.cancel)
+        } else if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
             NSWorkspace.shared.open(url)
             decisionHandler(.cancel)
         } else {

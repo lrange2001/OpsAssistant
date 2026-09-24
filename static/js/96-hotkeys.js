@@ -244,6 +244,16 @@ function stealBinding(cmdId, binding) {
   }
   persistKeys();
 }
+// Backspace 历史后退拦截:焦点不在可编辑元素时,WebKit 默认把 Delete/Backspace 当"后退",
+// SPA 一退就到壳层预热的 about:blank,整窗白屏(2026-09-24 事故)。只吃默认行为、不拦按键分发:
+// 终端输入走隐藏 textarea(可编辑元素,不经过这里),快捷键录制自带独占处理。
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Backspace" || e.defaultPrevented) return;
+  const t = e.target;
+  if (t instanceof Element && (t.closest("input, textarea, select") || t.isContentEditable)) return;
+  e.preventDefault();
+});
+
 // 录制/按键搜索的键盘独占:window capture,先于分发器吃键
 document.addEventListener("keydown", (e) => {
   if (!recState && !keysArmed) return;
