@@ -4,6 +4,8 @@
 
 **Mac 专用的内网运维 AI 助手** —— 把「SSH 登服务器敲命令」和「问 AI」合进一个窗口
 
+**Mac-native AI ops copilot** — a real SSH terminal beside the chat; `/vvv` feeds live terminal context to the model. MCP plugins · cc-switch model routing · 100% local data
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Apple%20Silicon-black.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B%20%7C%20stdlib%20only-3776AB.svg)
