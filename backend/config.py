@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from . import datadir
-from .datadir import _move_data_items, _rebind_data_dir, _write_pointer, DEFAULT_DATA_DIR, POINTER_PATH
+from .datadir import _move_data_items, _rebind_data_dir, _write_user_config, DEFAULT_DATA_DIR, USER_CONFIG_PATH
 
 # ---- split body (verify: 勿动本行以上) ----
 # ---------------------------- 配置 ----------------------------
@@ -91,9 +91,9 @@ def api_datadir_set(body):
     if not ok:
         return {"ok": False, "error": "迁移失败,数据保持原位: " + err}
     _rebind_data_dir(target)
-    datadir.DATA_DIR_SOURCE = "pointer"
-    _write_pointer(target)
+    datadir.DATA_DIR_SOURCE = "config"
+    _write_user_config(target)
     CONFIG = load_config()  # 立即从新位置热载配置
-    print("[datadir] 已迁移到 %s(指针 %s),重启后完全生效" % (target, POINTER_PATH))
+    print("[datadir] 已迁移到 %s(位置记录 %s),重启后完全生效" % (target, USER_CONFIG_PATH))
     return {"ok": True, "dir": target, "restart_required": True}
 

@@ -44,10 +44,6 @@
       <div id="ssh-panel">
         <div class="ssh-bar">
           <div class="ssh-tabs" id="ssh-tabs"></div>
-          <select id="ssh-host-sel" class="sp-input" style="width:200px;flex-shrink:0" title="Open another terminal — manage hosts in Settings"><option value="">Connect to…</option></select>
-          <button class="mini-btn" id="ssh-reconn" style="margin:0" title="Kill and reconnect this terminal's host">Reconnect</button>
-          <button class="mini-btn" id="ssh-master-close" style="margin:0" title="Close this terminal and its shared authenticated link">Close link</button>
-          <button class="mini-btn" id="ssh-collapse" style="margin:0" title="Hide the panel (terminals keep running)">Hide</button>
         </div>
         <div id="ssh-screen" title="Click here, then type"></div>
         <input id="ssh-hidden" autocomplete="off" spellcheck="false">
@@ -374,7 +370,7 @@ description: 一句话描述,供索引与检索
         </div>
         <div class="hint-text" id="datadir-note" style="margin:2px 0 10px"></div>
         <div class="rule-row">
-          <input class="sp-input" id="datadir-new" placeholder="新位置,如 ~/ForFreedomData" spellcheck="false" style="flex:1">
+          <input class="sp-input" id="datadir-new" placeholder="新位置,如 /Volumes/data/AssistantData" spellcheck="false" style="flex:1">
           <button class="mini-btn primary" id="btn-apply-datadir" style="margin:0">应用并迁移</button>
         </div>
         <div class="hint-text" style="margin-top:8px">改位置会把现有数据(配置 / 检查点 / 技能 / 子代理 / 命令 / 记忆 / 定时任务 / 用量 / MCP)整体搬到新位置,重启后生效。</div>

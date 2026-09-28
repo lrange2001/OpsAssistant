@@ -487,11 +487,11 @@ async function run(browser) {
   ok("ui: 左拖变窄且触发 resize 并记忆宽度(ff-ssh-w)", st.resizes > resizesBefore && st.panelW < wRight - 100 && st.panelW >= 280 &&
     st.w && Math.abs(parseInt(st.w) - st.panelW) <= 2, JSON.stringify(st));
 
-  /* T5 收起/展开 + 会话保留 */
-  await page.click("#ssh-collapse");
-  ok("ui: 收起面板(会话保留)", await page.evaluate(() => !document.querySelector("#ssh-panel").classList.contains("open") && window.__ssh.sessions.length === 1));
+  /* T5 收起/展开 + 会话保留(工具条 Hide 按钮已移除,收起走徽章/Cmd+4) */
   await page.click("#ssh-chip");
-  ok("ui: 点徽章重新展开", await page.evaluate(() => document.querySelector("#ssh-panel").classList.contains("open")));
+  ok("ui: 点徽章收起面板(会话保留)", await page.evaluate(() => !document.querySelector("#ssh-panel").classList.contains("open") && window.__ssh.sessions.length === 1));
+  await page.click("#ssh-chip");
+  ok("ui: 再点徽章重新展开", await page.evaluate(() => document.querySelector("#ssh-panel").classList.contains("open")));
 
   /* T6 /vvv 首次全量 */
   await page.evaluate(() => window.__ssh.push(
@@ -739,7 +739,7 @@ async function run(browser) {
       /s\d+-mock/.test(b.textContent) && /ControlMaster: running/.test(b.textContent) && /\/vvv sent: \d+/.test(b.textContent);
   }));
 
-  /* T16 断连显示退出码 + 重连 */
+  /* T16 断连显示退出码;重连 = 关标签再 /ssh(工具条已整排移除,无 Reconnect 按钮) */
   await page.evaluate(() => window.__ssh.exit(255));
   await sleep(700);
   st = await page.evaluate(() => ({
@@ -752,26 +752,39 @@ async function run(browser) {
   ok("ui: 断连标签点熄灭且徽章标记 off", tb.length === 1 && !tb[0].ok && /\(off\)/.test(st.chip), st.chip + JSON.stringify(tb));
   ok("ui: 断连后光标消失", !st.cur);
   const connectsBefore = await page.evaluate(() => window.__ssh.connects.length);
-  await page.click("#ssh-reconn");
-  await sleep(700);
+  await page.click("#ssh-tabs .ssh-tab:nth-child(1) .x");   // 关死标签(会话解绑保留)
+  await sleep(400);
+  await input.fill("/ssh ops");
+  await input.press("Enter");
+  await page.waitForFunction(() => document.querySelectorAll("#ssh-tabs .ssh-tab").length === 1, null, { timeout: 4000 });
+  await sleep(400);
   st = await page.evaluate(() => ({
     n: window.__ssh.connects.length,
     screen: document.querySelector("#ssh-screen").textContent,
   }));
   tb = await tabs();
-  ok("ui: 重连发起新连接并恢复(旧标签被替换)", st.n === connectsBefore + 1 && tb.length === 1 && tb[0].ok && st.screen.includes("Welcome"), st.screen.slice(-40));
+  ok("ui: 关标签再 /ssh 重连恢复(同机按亲和绑回)", st.n === connectsBefore + 1 && tb.length === 1 && tb[0].ok && st.screen.includes("Welcome"), st.screen.slice(-40));
 
-  /* T17 Close link:master-close + dispose */
-  await page.click("#ssh-master-close");
-  await sleep(600);
+  /* T17 工具条整排移除:连接下拉/Reconnect/Close link/Hide 全部不存在,标签条与 + 保留 */
   st = await page.evaluate(() => ({
-    posts: window.__ssh.posts.filter(p => p.ep === "master-close"),
-    disposed: window.__ssh.disposed,
+    sel: !!document.querySelector("#ssh-host-sel"),
+    reconn: !!document.querySelector("#ssh-reconn"),
+    masterClose: !!document.querySelector("#ssh-master-close"),
+    collapse: !!document.querySelector("#ssh-collapse"),
+    tabs: !!document.querySelector("#ssh-tabs"),
+    add: !!document.querySelector("#ssh-tabs .ssh-tab-add"),
+  }));
+  ok("ui: 工具条整排移除(下拉/Reconnect/Close link/Hide)", !st.sel && !st.reconn && !st.masterClose && !st.collapse, JSON.stringify(st));
+  ok("ui: 标签条与 + 保留", st.tabs && st.add, JSON.stringify(st));
+  await page.click("#ssh-tabs .ssh-tab:nth-child(1) .x");   // 关掉重连的终端,恢复无终端态(旧 Close link 用例同款收尾)
+  await sleep(400);
+  st = await page.evaluate(() => ({
+    disposed: window.__ssh.disposed.length,
     panelOpen: document.querySelector("#ssh-panel").classList.contains("open"),
     chip: document.querySelector("#ssh-chip").style.display,
     sessions: window.__ssh.sessions.length,
   }));
-  ok("ui: Close link 走 master-close 并断开", st.posts.length === 1 && st.disposed.length >= 1 && !st.panelOpen && st.chip === "none" && st.sessions === 0, JSON.stringify(st));
+  ok("ui: 关最后一个标签 dispose 并收面板", st.disposed >= 2 && !st.panelOpen && st.chip === "none" && st.sessions === 0, JSON.stringify(st));
 
   /* T18 设置「连接」页:密码字段回填(点击编辑可查看密码)+ 保存带回 */
   await page.evaluate(() => { document.querySelector("#btn-settings").click(); });
@@ -805,16 +818,15 @@ async function run(browser) {
   ok("set: 保存主机走 POST 且带密码", st.posts >= 1 && st.toast && hostsPost.body.password === "pw-ops-123", JSON.stringify(st));
   await page.evaluate(() => { document.querySelector("#drawer-close").click(); });
 
-  /* T19 /ssh 无参数打开面板聚焦下拉;本地侧栏终端不受影响 */
+  /* T19 /ssh 无参数打开面板并给 /ssh <name> 指引;本地侧栏终端不受影响 */
   await input.fill("/ssh");
   await input.press("Enter");
   await sleep(400);
   st = await page.evaluate(() => ({
     panelOpen: document.querySelector("#ssh-panel").classList.contains("open"),
-    focus: document.activeElement && document.activeElement.id,
-    opts: document.querySelectorAll("#ssh-host-sel option").length,
+    hint: (([...document.querySelectorAll(".msg.local .bubble")].pop() || {}).textContent || ""),
   }));
-  ok("cmd: /ssh 无参开面板", st.panelOpen && st.opts >= 3, JSON.stringify(st));
+  ok("cmd: /ssh 无参开面板给 /ssh <name> 指引", st.panelOpen && /\/ssh <name>/.test(st.hint), JSON.stringify(st).slice(0, 120));
   await input.fill("/terminal");
   await input.press("Enter");
   await sleep(1500);
@@ -960,6 +972,49 @@ async function run(browser) {
   }));
   ok("multi: 最后一个标签关闭后收面板藏徽章", st.tabs === 0 && !st.panelOpen && st.chip === "none" && st.sessions === 0, JSON.stringify(st));
 
+  /* T23b aiops:会话结束关掉自己名下的终端,再连另一台服务器——不被抢走运维会话,面板始终知道终端在不在 */
+  await input.fill("/ssh ops");
+  await input.press("Enter");
+  await page.waitForFunction(() => document.querySelectorAll("#ssh-tabs .ssh-tab").length === 1, null, { timeout: 4000 });
+  const opsId = await page.evaluate(() => { setMode("aiops"); return curId; });
+  await page.evaluate(() => sshCloseSession(0));   // 第一个会话结束:关掉它的终端(标签 ×)
+  await sleep(300);
+  await input.fill("/ssh web");
+  await input.press("Enter");
+  await page.waitForFunction(() => document.querySelectorAll("#ssh-tabs .ssh-tab").length === 1, null, { timeout: 4000 });
+  await sleep(400);
+  tb = await tabs();
+  st = await page.evaluate(([id]) => ({
+    still: curId === id, mode: curMode(),
+    active: sshActive() ? sshActive().label : null,
+    chipShown: document.querySelector("#ssh-chip").style.display !== "none",
+    screen: document.querySelector("#ssh-screen").textContent,
+    actIdx: [...document.querySelectorAll("#ssh-tabs .ssh-tab")].findIndex(t => t.classList.contains("active")),
+    pairChat: sshSessions[0] ? sshSessions[0].chat : null,
+  }), [opsId]);
+  ok("aiops: 连异机保持在原运维会话(不被抢走)", st.still && st.mode === "aiops", JSON.stringify(st).slice(0, 160));
+  ok("aiops: 面板立即显示新终端(徽章+激活标签+屏幕)", st.active === "root@10.0.0.8" && st.chipShown && st.actIdx === 0 && st.screen.includes("Welcome"), JSON.stringify(st).slice(0, 160));
+  ok("aiops: 新终端按亲和配对新会话(非运维会话)", st.pairChat && st.pairChat !== opsId, String(st.pairChat));
+  // 切走再切回运维会话:面板仍认终端、键盘仍送达(曾:屏空/徽章藏/键入落空)
+  const webChatId = await page.evaluate(() => sshSessions[0].chat);
+  await page.evaluate(([id]) => switchSession(id), [webChatId]);
+  await sleep(200);
+  await page.evaluate(([id]) => switchSession(id), [opsId]);
+  await sleep(300);
+  await page.focus("#ssh-hidden");
+  await page.keyboard.type("echo AIOPS-PING");
+  await sleep(400);
+  st = await page.evaluate(() => ({
+    active: sshActive() ? sshActive().label : null,
+    chipShown: document.querySelector("#ssh-chip").style.display !== "none",
+    writes: window.__ssh.cur() ? window.__ssh.cur().writes.join("") : "",
+    screen: document.querySelector("#ssh-screen").textContent,
+  }));
+  ok("aiops: 切回运维会话面板仍认终端(徽章+显示)", st.active === "root@10.0.0.8" && st.chipShown && st.screen.includes("Welcome"), JSON.stringify(st).slice(0, 160));
+  ok("aiops: 键盘输入送达终端", st.writes.includes("echo AIOPS-PING"), JSON.stringify(st.writes.slice(-40)));
+  await page.evaluate(() => { sshCloseSession(0); setMode("build"); });   // 清场:回到无终端的默认态(T24 门控)
+  await sleep(300);
+
   /* T24 无终端时:终端命令从 /help 与 / 面板消失,输入给连接指引 */
   await input.fill("/help");
   await input.press("Enter");
@@ -1031,6 +1086,11 @@ async function run(browser) {
     await sleep(250);
   }
   const nSess26 = await page.evaluate(() => sessions.length);
+  await page.evaluate(([id]) => {   // 钉住重挂前置:当前 = sess1 且其主机亲和 = h-ops(同机收养 / 异机新开两条路径都覆盖)
+    switchSession(id);
+    const cs = curSession();
+    if (cs) cs.sshHost = "h-ops";
+  }, [sess1]);
   await page.evaluate(() => {
     const S = window.__ssh;
     S.sessions = [
@@ -1361,7 +1421,7 @@ async function run(browser) {
     for (const s of sessions) if (s.id !== keep) s.title = "iso-待删" + (++i);   // 标记待删,便于按标题定位
     persist(); renderSessionList();
   }, [sess1]);
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 15; i++) {   // 上限放宽:主机亲和语义下中途连接会多开几个会话,一次清干净
     const left = await page.evaluate(() => [...document.querySelectorAll("#session-list .session-item")].filter(d => d.querySelector(".t").textContent.includes("iso-待删")).length);
     if (!left) break;
     await page.evaluate(() => {
@@ -1432,6 +1492,51 @@ async function run(browser) {
   try { clip = await page.evaluate(() => navigator.clipboard.readText()); } catch (e) {}
   ok("sel: Cmd+C 复制选区(不进 PTY、选区保留)", clip === "SELECT-MARKER-77" && !st.c03 && st.sel === "SELECT-MARKER-77",
     "clip=" + JSON.stringify(clip) + " " + JSON.stringify(st));
+
+  /* TX 主机亲和:异机不收养(新会话)/同机复用(收养)——隔天连 B 不再串进 A 的会话 */
+  {
+    // 隔天场景:重载后运行时终端为空,localStorage 留着 A 的会话(带 sshTabs 元数据,模拟存量数据)
+    const idA = await page.evaluate(() => {
+      const sA = curSession();
+      sA.title = "A-host-history";
+      sA.messages.push({ role: "user", content: "AFFINITY-MARK-A" });
+      sA.sshTabs = [{ sid: "sX-dead", label: "ops@10.0.0.8", hostId: "h-ops", key: "cm-a.sock" }];
+      sessions = [sA, ...sessions.filter(x => x !== sA)];
+      curId = sA.id;
+      persist();
+      return sA.id;
+    });
+    await page.reload({ waitUntil: "networkidle" });
+    await sleep(500);
+    let stAf = await page.evaluate(() => ({ curId, n: sessions.length }));
+    ok("aff: 重载后恢复 A 会话为当前", stAf.curId === idA && stAf.n >= 1, JSON.stringify(stAf));
+
+    await page.evaluate(() => sshConnect("h-web"));   // 连不同主机
+    await sleep(700);
+    stAf = await page.evaluate((idA) => ({
+      curId, n: sessions.length,
+      curHost: curSession().sshHost || "",
+      curTabs: (curSession().sshTabs || []).map(t => t.hostId),
+      aTabs: ((sessions.find(s => s.id === idA) || {}).sshTabs || []).map(t => t.hostId),
+      aMsgs: ((sessions.find(s => s.id === idA) || {}).messages || []).some(m => m.content === "AFFINITY-MARK-A"),
+      paired: sshSessions.map(s => ({ host: s.hostId, chat: s.chat })),
+    }), idA);
+    ok("aff: 连异机新开会话且 B 终端配对新会话", stAf.curId !== idA && stAf.curHost === "h-web" && stAf.curTabs.includes("h-web") &&
+      stAf.paired.some(p => p.host === "h-web" && p.chat === stAf.curId), JSON.stringify(stAf));
+    ok("aff: A 会话消息保留且未被 B 污染", stAf.aMsgs && !stAf.aTabs.includes("h-web"), JSON.stringify(stAf));
+
+    // 同机复用:断开 B 终端后重连同一主机 → 收养当前会话(不另建)
+    const nBefore = await page.evaluate(() => sessions.length);
+    await page.evaluate(() => { const i = sshSessions.findIndex(s => s.chat === curId); if (i >= 0) sshCloseSession(i); });
+    await sleep(300);
+    await page.evaluate(() => sshConnect("h-web"));
+    await sleep(700);
+    stAf = await page.evaluate(() => ({
+      n: sessions.length, curHost: curSession().sshHost || "",
+      paired: sshSessions.filter(s => s.chat === curId).length,
+    }));
+    ok("aff: 同主机重连复用当前会话(不另建)", stAf.n === nBefore && stAf.curHost === "h-web" && stAf.paired === 1, JSON.stringify(stAf));
+  }
 
   await browser.close();
 }

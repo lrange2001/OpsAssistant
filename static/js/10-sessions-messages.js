@@ -14,6 +14,7 @@ let config = null;
 let cfgData = { skills: [], skills_disabled: [], mcp: [], mcp_servers: {}, ccswitch: null, permission: null, agents: [] };
 let uimode = localStorage.getItem("ff-uimode") || "coding";
 let permMode = localStorage.getItem("ff-perm-mode") || "build";
+if (permMode === "ops" || permMode === "aiops") { permMode = "build"; localStorage.setItem("ff-perm-mode", "build"); }   // 存量迁移:ops/aiops 不作全局默认(新会话不该继承一个可能无终端的终端型模式)
 let attachments = [];   // data URLs,最多 5 张
 let activeSkills = [];  // $ 面板选中的技能 chip(ZCode:序列化为消息开头 $name 令牌,随草稿保存)
 let activeQuotes = [];  // 选中引用 chip(ZCode chat.selections:类型标记 + 条数/字符上限,随草稿保存)
@@ -25,26 +26,27 @@ const MODE_INFO = {
   edit: { label: "edit", desc: "编辑模式:文件读写自动执行,所有 shell 命令需要确认" },
   yolo: { label: "yolo", desc: "完全自动:所有操作直接执行(拒绝规则仍然生效)" },
   ops: { label: "ops", desc: "运维模式:模型把命令逐条打进在线 SSH 终端输入行、绝不代按回车,你回车执行、输出自动读回,逐台链式直到完成" },
+  aiops: { label: "aiops", desc: "智能运维:只读排查命令自动执行免回车(输出自动读回),任何写入/变更命令仍逐条打进输入行等你回车确认" },
 };
-const MODE_ORDER = ["plan", "build", "edit", "yolo", "ops"];
+const MODE_ORDER = ["plan", "build", "edit", "yolo", "ops", "aiops"];
 
 function curMode() { const s = curSession(); return (s && s.mode) || permMode; }
+function isTermMode(m) { return m === "ops" || m === "aiops"; }   // 终端驱动型模式:共用在线终端准入、视图覆盖、布防随动等语义
 function setMode(m, quiet) {
   if (!MODE_INFO[m]) return false;
-  if (m === "ops" && !(typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive))) { toast("ops 模式需要至少一个在线 SSH 终端(先 /ssh 连接)", "warn"); return false; }
-  permMode = m;
-  localStorage.setItem("ff-perm-mode", m);
+  if (isTermMode(m) && !(typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive))) { toast(m + " 模式需要至少一个在线 SSH 终端(先 /ssh 连接)", "warn"); return false; }
+  if (!isTermMode(m)) { permMode = m; localStorage.setItem("ff-perm-mode", m); }   // 全局默认只记权限型模式;ops/aiops 是会话级工作流,不污染新会话
   sshViewSid = null;   // 模式切换丢弃 ops 视图覆盖(退出 ops 后必须回到纯 1:1 配对语义;10-sessions 在 80-ssh 之前加载,但 setMode 只在全部脚本就绪后运行)
   if (typeof sshSyncChat === "function") sshSyncChat();   // 清覆盖必须连画面一起回落:否则屏幕停在旧视图终端,键盘却已切回配对终端,键入发进看不见的机器
   const s = curSession();
   if (s) { s.mode = m; persist(); }
   renderModeRadios();
-  if (m === "ops") opsFollowArmed();   // 进入 ops:本会话还有等待回车的终端时面板跟过去(与切回会话、刷新还原同语义)
+  if (isTermMode(m)) opsFollowArmed();   // 进入 ops/aiops:本会话还有等待回车的终端时面板跟过去(与切回会话、刷新还原同语义)
   if (!quiet) toast("Mode: " + m);
   return true;
 }
-function cycleMode() {   // 循环切换;ops 需在线 SSH 终端,无终端时跳过继续找下一个有资格的
-  const ok = (m) => m !== "ops" || (typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive));
+function cycleMode() {   // 循环切换;ops/aiops 需在线 SSH 终端,无终端时跳过继续找下一个有资格的
+  const ok = (m) => !isTermMode(m) || (typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive));
   for (let i = 1; i <= MODE_ORDER.length; i++) {
     const m = MODE_ORDER[(MODE_ORDER.indexOf(curMode()) + i) % MODE_ORDER.length];
     if (ok(m)) { setMode(m); return; }

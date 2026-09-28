@@ -1,53 +1,93 @@
 # -*- coding: utf-8 -*-
-"""数据目录:三级解析(env FF_DATA_DIR > 指针 > 缺省)、启动迁移、运行期重绑与全部数据路径全局(重绑名字,外部一律本模块属性访问)"""
+"""数据目录:三级解析(env FF_DATA_DIR > ~/.assistant_config > 缺省)、启动迁移、运行期重绑与全部数据路径全局(重绑名字,外部一律本模块属性访问)"""
 
+import json
 import os
 import shutil
 
 # ---- split body (verify: 勿动本行以上) ----
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 数据目录(config.json / skills / 记忆 / 检查点等)解析顺序:
-#   1) 环境变量 FF_DATA_DIR —— 开发/测试实例专用,最高优先;不触发迁移、不写指针;
-#   2) 指针文件 ~/Library/Application Support/ForFreedomAssistant/datadir.txt(首行 = 绝对路径);
-#   3) 缺省 ~/ForFreedom。首次启动若缺省目录没有数据而旧目录(应用支持目录)还有,自动整体迁过来。
-DATA_STATE_DIR = os.path.expanduser("~/Library/Application Support/ForFreedomAssistant")
-POINTER_PATH = os.path.join(DATA_STATE_DIR, "datadir.txt")
-DEFAULT_DATA_DIR = os.path.expanduser("~/ForFreedom")
-# 数据项清单 = 本文件实际引用的 DATA_DIR 下的文件/目录;换位置/迁移按此逐项搬,指针文件不算数据项
+#   1) 环境变量 FF_DATA_DIR —— 开发/测试实例专用,最高优先;不触发迁移、不写位置记录;
+#   2) 用户配置 ~/.assistant_config(JSON 字段 data_dir)—— 一次设置永久沿用,重新编译/
+#      重启都读它;指向的目录被清掉(如 /tmp 随重启清空)就原址重建,数据绝不散落到别处;
+#   3) 旧指针 ~/Library/Application Support/ForFreedomAssistant/datadir.txt —— 读到即升级
+#      写进 ~/.assistant_config 并删除旧指针(一次性兼容);
+#   4) 缺省 /tmp/assisdata(FF_DEFAULT_DATA_DIR 可覆盖,测试沙盒用)。落定目录里没有
+#      config.json 时,把旧位置的服务数据项(~/ForFreedom 与应用支持目录,按 DATA_ITEMS
+#      白名单逐项搬,个人文件绝不动)自动整体迁来;落定后位置写进 ~/.assistant_config。
+USER_CONFIG_PATH = os.path.expanduser("~/.assistant_config")
+LEGACY_STATE_DIR = os.path.expanduser("~/Library/Application Support/ForFreedomAssistant")
+LEGACY_POINTER_PATH = os.path.join(LEGACY_STATE_DIR, "datadir.txt")
+DEFAULT_DATA_DIR = os.environ.get("FF_DEFAULT_DATA_DIR") or "/tmp/assisdata"
+OLD_DEFAULT_DATA_DIR = os.path.expanduser("~/ForFreedom")   # 旧缺省=用户个人目录,只按白名单搬
+LEGACY_DATA_DIRS = (OLD_DEFAULT_DATA_DIR, LEGACY_STATE_DIR)
+# 数据项清单 = 本文件实际引用的 DATA_DIR 下的文件/目录;换位置/迁移按此逐项搬,
+# 位置记录(~/.assistant_config)与旧指针文件不算数据项
 DATA_ITEMS = ("config.json", "skills", "agents", "memory", "commands",
               "checkpoints", "automations", "usage.jsonl", "facts")
 
 
-def _read_pointer():
-    """指针文件首行(strip);缺失/非绝对路径/目录已不存在一律视为无效"""
+def _read_user_config():
+    """~/.assistant_config 的 data_dir(expanduser 后须为绝对路径);缺失/解析失败一律视为无效。
+    目录不存在不算无效 —— 那正是"被清掉后原址重建"要处理的情形。"""
     try:
-        with open(POINTER_PATH, "r", encoding="utf-8") as f:
+        with open(USER_CONFIG_PATH, "r", encoding="utf-8") as f:
+            val = str((json.load(f).get("data_dir") or "")).strip()
+    except OSError:
+        return ""
+    except ValueError as e:
+        print("[datadir] 警告:%s 不是合法 JSON(%s),忽略之" % (USER_CONFIG_PATH, e))
+        return ""
+    val = os.path.expanduser(val)
+    return val if (val and os.path.isabs(val)) else ""
+
+
+def _read_legacy_pointer():
+    """旧指针文件首行(expanduser 后须为绝对路径);目录存不存在交给上级原址重建"""
+    try:
+        with open(LEGACY_POINTER_PATH, "r", encoding="utf-8") as f:
             line = f.readline().strip()
     except OSError:
         return ""
-    if line and os.path.isabs(line) and os.path.isdir(line):
-        return line
-    return ""
+    line = os.path.expanduser(line)
+    return line if (line and os.path.isabs(line)) else ""
+
+
+def _ensure_dir(path):
+    """确保数据目录存在;不可建(如卷未挂载)返回 False,由上级落到下一来源"""
+    try:
+        os.makedirs(path, exist_ok=True)
+        return True
+    except OSError as e:
+        print("[datadir] 数据目录不可用 %s(%s)" % (path, e))
+        return False
 
 
 def resolve_data_dir():
     env = (os.environ.get("FF_DATA_DIR") or "").strip()
     if env:
         return os.path.abspath(os.path.expanduser(env)), "env"
-    p = _read_pointer()
-    if p:
-        return p, "pointer"
+    p = _read_user_config()
+    if p and _ensure_dir(p):
+        return p, "config"
+    legacy = _read_legacy_pointer()
+    if legacy and _ensure_dir(legacy):
+        return legacy, "legacy-pointer"
     return DEFAULT_DATA_DIR, "default"
 
 
 def _move_data_items(src, dst):
-    """把 src 下的数据项逐项 move 到 dst(开始前预检目标无同名项;中途失败回滚已移项)。
-    返回 (True, "") 或 (False, 错误说明)。"""
+    """把 src 下的数据项逐项 move 到 dst(目标同名项若是空目录则先删空目录再搬,零数据风险;
+    其余同名冲突报错;中途失败回滚已移项)。返回 (True, "") 或 (False, 错误说明)。"""
     items = [n for n in DATA_ITEMS if os.path.lexists(os.path.join(src, n))]
-    clash = [n for n in items if os.path.lexists(os.path.join(dst, n))]
-    if clash:
-        return False, "目标目录已存在同名数据项: " + ", ".join(clash)
     os.makedirs(dst, exist_ok=True)
+    for n in items:
+        d = os.path.join(dst, n)
+        if os.path.isdir(d) and not os.listdir(d):
+            os.rmdir(d)   # 目标里的空壳目录(如启动脚本刚建出来的),让位给真实数据
+        elif os.path.lexists(d):
+            return False, "目标目录已存在同名数据项: " + n
     moved = []
     try:
         for n in items:
@@ -63,35 +103,51 @@ def _move_data_items(src, dst):
     return True, ""
 
 
-def _write_pointer(path):
-    os.makedirs(DATA_STATE_DIR, exist_ok=True)
-    tmp = POINTER_PATH + ".tmp"
+def _write_user_config(path):
+    """位置记录原子写入 ~/.assistant_config(本应用专属,整文件重写)"""
+    tmp = USER_CONFIG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write(path + "\n")
-    os.replace(tmp, POINTER_PATH)
+        json.dump({"data_dir": path}, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, USER_CONFIG_PATH)
 
 
 def _startup_migrate(dir_, source):
-    """一次性迁移:解析落到缺省 ~/ForFreedom 且那里没有 config.json,而旧目录(应用支持目录)
-    还存在数据项时,把旧目录数据整体搬到缺省目录并写指针;任何失败则报错到启动日志并继续用旧目录。"""
-    if source != "default":
+    """启动收尾(env 除外):落定目录里没有 config.json 时,把旧位置的服务数据项整体搬来
+    (不限解析来源 —— 旧指针指向的目录可能已被清空,真实数据散在旧缺省 ~/ForFreedom;
+    失败则本次原地用旧目录,不丢数据);最后把落定位置写进 ~/.assistant_config
+    (一次设置,重新编译/重启直接沿用),旧指针来源随之升级并删除旧指针文件。"""
+    if source == "env":
         return dir_, source
-    if os.path.exists(os.path.join(DEFAULT_DATA_DIR, "config.json")):
-        return dir_, source
-    legacy_items = [n for n in DATA_ITEMS if os.path.lexists(os.path.join(DATA_STATE_DIR, n))]
-    if not legacy_items:
-        return dir_, source
-    print("[datadir] 首次启动:把旧数据目录的 %d 项迁到 %s …" % (len(legacy_items), DEFAULT_DATA_DIR))
-    ok, err = _move_data_items(DATA_STATE_DIR, DEFAULT_DATA_DIR)
-    if not ok:
-        print("[datadir] 迁移失败(%s),继续使用旧目录 %s" % (err, DATA_STATE_DIR))
-        return DATA_STATE_DIR, "legacy"
+    upgrade_pointer = source == "legacy-pointer"
+    if source == "legacy-pointer":
+        source = "config"
+    if not os.path.exists(os.path.join(dir_, "config.json")):
+        for legacy in LEGACY_DATA_DIRS:
+            if os.path.realpath(legacy) == os.path.realpath(dir_):
+                continue
+            items = [n for n in DATA_ITEMS if os.path.lexists(os.path.join(legacy, n))]
+            if not items:
+                continue
+            print("[datadir] 首次启动:把旧位置 %s 的 %d 项迁到 %s …" % (legacy, len(items), dir_))
+            ok, err = _move_data_items(legacy, dir_)
+            if ok:
+                print("[datadir] 迁移完成")
+                continue
+            if not any(os.path.lexists(os.path.join(dir_, n)) for n in DATA_ITEMS):
+                print("[datadir] 迁移失败(%s),本次继续用旧目录 %s" % (err, legacy))
+                return legacy, "legacy"
+            print("[datadir] 旧位置 %s 迁移失败(%s),跳过" % (legacy, err))
     try:
-        _write_pointer(DEFAULT_DATA_DIR)
-        print("[datadir] 迁移完成,数据目录固定为 %s(指针 %s)" % (DEFAULT_DATA_DIR, POINTER_PATH))
+        _write_user_config(dir_)
+        if upgrade_pointer:
+            try:
+                os.remove(LEGACY_POINTER_PATH)   # 旧指针退役,位置记录以 ~/.assistant_config 为准
+            except OSError:
+                pass   # 删不掉无碍:下次启动优先读到 ~/.assistant_config,旧指针只是闲置
     except OSError as e:
-        print("[datadir] 指针写入失败(%s);数据已就位,下次启动会再次尝试" % e)
-    return DEFAULT_DATA_DIR, "default"
+        print("[datadir] 位置记录写入 %s 失败(%s);下次启动会再次尝试" % (USER_CONFIG_PATH, e))
+    return dir_, source
 
 
 DATA_DIR, DATA_DIR_SOURCE = _startup_migrate(*resolve_data_dir())
@@ -122,5 +178,3 @@ AGENTS_DIR = os.path.join(DATA_DIR, "agents")
 MEMORY_DIR = os.path.join(DATA_DIR, "memory")
 COMMANDS_DIR = os.path.join(DATA_DIR, "commands")
 FACTS_DIR = os.path.join(DATA_DIR, "facts")   # ops 主机画像缓存(ops_facts 工具)
-
-

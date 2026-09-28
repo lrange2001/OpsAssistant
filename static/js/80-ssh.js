@@ -7,16 +7,27 @@ let sshSessions = [];        // [{sid,label,hostId,key,chat,alive,pw,pwUsed,stat
 // ops 视图覆盖:ops 会话驱动全部在线终端,「看哪台终端」与「哪个会话」解耦——点标签只切视图、布防自动跟随;
 // 切会话/切模式即丢弃。非 ops 恒 null,sshActive() 与 sshCur() 完全等价(1:1 配对语义不变)
 let sshViewSid = null;
-let sshFollowHost = null;   // ops 重连跟随:Reconnect 发起的主机 id,一次性标记——连接完成后视图切到新终端(重连换 sid,旧覆盖已随旧终端关闭失效)
 function sshCur() { return sshSessions.find(s => s.chat === curId) || null; }   // 当前会话配对的终端(1:1,至多一个;仅配对语义:/vvv、门控、连接配对都用它)
-function sshActive() {   // 面板实际显示与接收键盘的终端:ops 有视图覆盖则显示覆盖终端(已移除的自动回落),否则= 配对终端
+function sshActive() {   // 面板实际显示与接收键盘的终端:ops 有视图覆盖则显示覆盖终端,否则= 配对终端
   if (sshViewSid) {
     const v = sshSessions.find(s => s.sid === sshViewSid);
     if (v) return v;
   }
-  return sshCur();
+  const c = sshCur();
+  if (c) return c;
+  // ops/aiops 会话驱动全部终端:自己名下没有配对终端(已关/配在别的会话)时面板不得空白——
+  // 回落第一个终端,否则关旧终端再连新服务器后面板全黑、徽章消失、键盘落空(不知道终端在不在)
+  if (isTermMode(curMode()) && sshSessions.length) return sshSessions[0];
+  return null;
 }
 function sshChatTabs() { return sshSessions.filter(s => s.chat === curId); }   // 命令门控用(1:1 下即 [sshCur()] )
+// 主机亲和:会话最后配对过的主机(独立字段 —— sshTabs 按运行时数组重建,隔天空窗期会被清空,不能当归属依据)。
+// 连接时仅「无亲和记录」或「同机」才收养当前会话;异机一律新开会话,杜绝 B 的终端绑进 A 的旧会话
+function sshHostMatch(cs, hostId) {
+  if (!cs) return true;
+  const hosts = new Set([cs.sshHost, ...(cs.sshTabs || []).map(t => t.hostId)].filter(Boolean));
+  return !hosts.size || hosts.has(hostId);
+}
 // 配对元数据:以运行时数组为准重建各聊天会话的 sshTabs(1:1 下至多一项)并随 persist() 落盘(无变动不写)
 function sshPersistMeta() {
   let dirty = false;
@@ -79,7 +90,7 @@ function renderSshTabs() {
     t.append(dot, lb, x);
     t.onclick = () => sshSwitch(i);
     t.title = ses.label + (ses.alive ? "" : " (off)") + "\n" + ses.sid + "\n" +
-      (curMode() === "ops"
+      (isTermMode(curMode())
         ? "Click to view this terminal (the ops conversation keeps driving all terminals)"
         : "Click to switch to this terminal's conversation\n/vvv /download /upload act on the current tab");
     wrap.appendChild(t);
@@ -91,15 +102,15 @@ function renderSshTabs() {
   plus.onclick = () => {
     const c = sshActive();
     if (c && c.hostId) sshConnect(c.hostId);   // 同主机新终端 = 新会话:复用窗口内免二次认证
-    else $("ssh-host-sel").focus();
+    else toast("Connect with /ssh <name> first — + reuses the active terminal's host (hosts in Settings > 连接)");
   };
   wrap.appendChild(plus);
 }
 function sshSwitch(i) {
   const ses = sshSessions[i];
   if (!ses) return;
-  if (curMode() === "ops") {
-    // ops:点标签只切终端视图(面板看哪台),聊天区留在 ops 会话——ops 会话驱动全部终端,不为看一眼终端而切走会话
+  if (isTermMode(curMode())) {
+    // ops/aiops:点标签只切终端视图(面板看哪台),聊天区留在终端型会话——它驱动全部终端,不为看一眼终端而切走会话
     sshViewSid = ses.sid;
     renderSshTabs();
     sshOpenPanel();
@@ -118,7 +129,7 @@ function sshSwitch(i) {
 /* ops 布防随动:面板切到布防终端(命令放在哪台,回车人审就在哪台,自动跟到眼前);skipFocus 供启动还原用——
    开局抢焦点进终端会把用户的打字拼进布防命令的输入行,只切视图不动焦点 */
 function sshSwitchToSid(sid, skipFocus) {
-  if (curMode() !== "ops") return;   // 仅 ops 可设视图覆盖(非 ops 恒 null 的不变量):切走模式后残留的布防在刷新还原时不得再设覆盖
+  if (!isTermMode(curMode())) return;   // 仅 ops/aiops 可设视图覆盖(其余恒 null 的不变量):切走模式后残留的布防在刷新还原时不得再设覆盖
   const ses = sshSessions.find(s => s.sid === sid);
   if (!ses) return;
   sshOpenPanel();
@@ -163,8 +174,7 @@ function sshCycleTerm() {     // 按 sshSessions 顺序切到可视终端的下�
 async function sshConnect(hostId) {
   if (!hostId) {
     sshOpenPanel();
-    $("ssh-host-sel").focus();
-    toast("Pick a host — each connection opens its own terminal tab (manage hosts in Settings > 连接)");
+    toast("Connect with /ssh <name> — each connection opens its own terminal tab (hosts in Settings > 连接)");
     return;
   }
   try {
@@ -177,15 +187,15 @@ async function sshConnect(hostId) {
       toast("Too many terminals open (max 8) — close a tab first", "warn");
       return;
     }
-    // 1:1 配对:当前会话已带终端则自动新建会话来配("+" 开的第二个终端就是第二个会话)
-    // ops 会话例外:新终端照常配对新会话,但聊天的当前会话留在 ops(ops 驱动全部终端,不该被抢焦点),正在看的终端也保持
-    const opsKeepId = (curMode() === "ops" && sshChatTabs().length) ? curId : null;
+    // 1:1 配对:当前会话已带终端、或其主机亲和与要连的主机不符(A 的旧会话不收养 B 的终端)则新建会话来配
+    // 终端型(ops/aiops)会话例外:新终端照常按上面规则配对(常常配进新会话),但聊天的当前会话保持在原地——
+    // 它驱动全部终端,不该被抢焦点;哪怕它名下暂时一个终端都没有(旧终端刚关)也一样
+    const opsKeepId = isTermMode(curMode()) ? curId : null;
     const opsKeepView = (opsKeepId && sshViewSid) ? sshViewSid : null;
-    const opsFollow = (curMode() === "ops" && sshFollowHost === hostId);   // 重连跟随(一次性):此刻判定并消费标记,连接完成后视图切到新终端
-    sshFollowHost = null;
-    if (sshChatTabs().length) newSession(true, { force: true });
+    if (sshChatTabs().length || !sshHostMatch(curSession(), hostId)) newSession(true, { force: true });
     const host = sshHostsCache.find(h => h.id === hostId) || {};
     const cs = curSession();
+    if (cs) cs.sshHost = hostId;   // 亲和随实际配对落定(重启后凭它识别"这台机器的会话",同机复用/异机新开)
     if (cs && cs.title === "新对话") { cs.title = j.label; renderSessionList(); }   // 配对会话还是默认名时换成主机名,列表可辨
     const ses = {
       sid: j.sid, label: j.label, hostId: hostId, key: j.control_key,
@@ -197,25 +207,26 @@ async function sshConnect(hostId) {
     sshSessions.push(ses);
     sshPersistMeta();
     renderSshTabs();
-    $("ssh-host-sel").value = hostId;
     termScreenClear($("ssh-screen"));
     sshOpenPanel();
     sshApply();
     sshPollKick(ses, 40);
     sshBadge();
     if (opsKeepId && sessions.some(x => x.id === opsKeepId)) {
+      const pairedHere = ses.chat === opsKeepId;   // 主机亲和复用:终端直接配进了 ops 会话(没另建会话)
       switchSession(opsKeepId);   // 切回 ops 会话:终端面板随之回到 ops 会话的视图,新终端留作后台标签
       if (opsKeepView && sshSessions.some(s => s.sid === opsKeepView) && sshViewSid !== opsKeepView) {
         sshViewSid = opsKeepView;   // 连接期间用户正在看的终端保持为视图(切会话会清覆盖,这里还原)
-        renderSshTabs();
-        sshApply();
-        sshBadge();
+      } else if (!pairedHere) {
+        sshViewSid = j.sid;   // 原本没在看任何终端(会话名下无终端):视图给刚连上的这台,面板立即可见
       }
-      toast("SSH connected: " + j.label + "(已配对新会话;当前保持在 ops 会话,模型可直接驱动新终端)");
+      if (sshViewSid) { renderSshTabs(); sshApply(); sshBadge(); }
+      toast(pairedHere
+        ? "SSH connected: " + j.label + "(已配对进当前运维会话,模型可直接驱动)"
+        : "SSH connected: " + j.label + "(已配对新会话;当前保持在原运维会话,模型可直接驱动新终端)");
     } else {
       toast("SSH connected: " + j.label + " (type in the terminal on the left" + (ses.pw ? "; saved password will be entered automatically" : "; MFA/OTP goes there too") + ")");
     }
-    if (opsFollow) sshSwitchToSid(j.sid);   // 重连完成:视图切到新终端(替换已失效的旧覆盖;重连是显式动作,焦点随新终端合理)
     $("ssh-hidden").focus();
   } catch (e) { toast("SSH connect failed: " + e.message, "err"); }
 }
@@ -240,14 +251,7 @@ function sshCloseSession(i, opts) {
   if (sshActive()) { sshApply(); sshBadge(); sshFit(); }
   else { termScreenClear($("ssh-screen")); sshBadge(); }   // 当前无可视终端:会话保留(关的是配对终端且无覆盖)
 }
-function sshReconnect() {
-  const c = sshActive();
-  const hostId = c ? c.hostId : ($("ssh-host-sel").value || "");
-  if (!hostId) { toast("No host to reconnect — pick one first", "warn"); return; }
-  if (curMode() === "ops" && c) sshFollowHost = hostId;   // ops:重连的正可能是视图终端,关闭会清覆盖——标记主机,连完视图跟到新终端
-  if (c) sshCloseSession(sshSessions.indexOf(c), { keepPanel: true });
-  sshConnect(hostId);   // 关闭只解绑,当前会话已无终端 → 重连绑回原会话,不会另建
-}
+/* 重连 = 关标签(×)再 /ssh <name> 或设置页「连接」:关闭只解绑会话,同机重连按主机亲和绑回原会话 */
 /* 保存过的密码:连接后 buf 尾部出现 password: 提示时自动填一次(回显关闭,不进日志) */
 function sshMaybeAutoPw(ses) {
   if (!ses.alive || !ses.pw || ses.pwUsed || ses.state.alt) return;
@@ -259,7 +263,18 @@ function sshMaybeAutoPw(ses) {
   }
 }
 function sshWriteTo(ses, data) {
-  if (ses && ses.alive) fetch("/api/ssh/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: ses.sid, data }) });
+  if (!ses || !ses.alive) return;
+  fetch("/api/ssh/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: ses.sid, data }) })
+    .then(r => r.json())
+    .then(j => {
+      if (!j || j.ok) return;
+      if (ses.alive) {   // 服务端已判死(会话退出/不存在):本地标记一次并告知,后续键入不再空发
+        ses.alive = false;
+        renderSshTabs(); sshBadge();
+        toast("终端 " + ses.label + " 已断开,刚才的输入未送达", "warn");
+      }
+    })
+    .catch(() => {});
 }
 function sshSend(data) {
   const c = sshActive();   // 键盘漏斗作用于面板正在显示的终端(ops 下= 视图覆盖终端;其余模式= 当前会话配对终端)
@@ -321,7 +336,7 @@ async function sshPoll(ses) {
       ses.alive = false;
       termAppendText(ses.state,
         (ses.state.tail && !ses.state.tail.endsWith("\n") ? "\n" : "") +
-        "[ssh exited: " + j.exited + " — Reconnect to try again]");
+        "[ssh exited: " + j.exited + " — close this tab and /ssh <name> to reconnect]");
       if (ses.timer) { clearTimeout(ses.timer); ses.timer = null; }
       renderSshTabs();
       sshBadge();
@@ -357,13 +372,6 @@ function sshFit() {
   }
   fetch("/api/ssh/resize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: c.sid, cols, rows }) });
 }
-async function sshMasterClose() {
-  const c = sshActive();
-  if (!c) return;
-  try { await sshPost("/api/ssh/master-close", { key: c.key }); } catch {}
-  sshCloseSession(sshSessions.indexOf(c));
-  toast("SSH link closed (shared connection dropped)");
-}
 async function sshReattach() {
   // 页面刷新后重挂:活着的终端按聊天会话配对恢复成标签(配对查各会话 sshTabs 元数据;无主终端:第一个归当前
   // 会话(尚未配对时),其余各自动新建会话配对 —— 维持 1:1;服务端 hist 不丢,/vvv 偏移照旧)。
@@ -371,15 +379,16 @@ async function sshReattach() {
   try {
     const j = await (await fetch("/api/ssh/status")).json();
     const alive = (j.sessions || []).filter(x => x.alive);
-    if (!alive.length) return;
+    if (!alive.length) { renderSshTabs(); return; }   // 无终端也画一次标签条:空面板照样有 +(点击给 /ssh 指引)
     try { sshHostsCache = ((await (await fetch("/api/ssh/hosts")).json()).hosts) || sshHostsCache; } catch {}
     let firstUnowned = true, listDirty = false;
     for (const x of alive) {
       if (sshSessions.some(ses => ses.sid === x.sid)) continue;
       let cs = null;
       for (const c2 of sessions) if ((c2.sshTabs || []).some(t => t.sid === x.sid)) { cs = c2; break; }
-      if (!cs && firstUnowned && !sshChatTabs().length) cs = curSession();   // 首个无主终端归当前会话(未配对时)
-      else if (!cs) { newSession(false, { force: true }); cs = curSession(); listDirty = true; }   // 其余无主:各配一个新会话
+      if (!cs && firstUnowned && !sshChatTabs().length && sshHostMatch(curSession(), x.host_id)) cs = curSession();   // 首个无主终端归当前会话(未配对且同机/无亲和时)
+      else if (!cs) { newSession(false, { force: true }); cs = curSession(); listDirty = true; }   // 其余无主/异机:各配一个新会话
+      if (cs) cs.sshHost = x.host_id;   // 亲和随实际配对落定
       firstUnowned = false;
       if (cs && cs.title === "新对话") { cs.title = x.label; listDirty = true; }
       const host = sshHostsCache.find(h => h.id === x.host_id) || {};
@@ -459,41 +468,5 @@ function dispatchTermOkKeys(e) {
   return false;
 }
 
-/* ---- 设置「连接」页:主机列表/表单/分组管理已 Vue 化,见 97-vue-ssh.js(renderSshHosts/saveSshHost/cancelSshHostEdit 在该文件定义);此处只留面板下拉 ---- */
-function renderSshHostSel() {
-  const sel = $("ssh-host-sel"); if (!sel) return;
-  const cur = sel.value;
-  sel.innerHTML = "";
-  const mkOpt = (h) => {
-    const o = document.createElement("option");
-    o.value = h.id;
-    o.textContent = (h.label || h.host) + " (" + (h.user || "-") + "@" + h.host + ")";
-    return o;
-  };
-  const ph = document.createElement("option");
-  ph.value = ""; ph.textContent = "Connect to…";
-  sel.appendChild(ph);
-  const groups = (sshGroupsCache || []).filter(Boolean);
-  if (groups.length) {
-    // 有分组:按组顺序输出 optgroup(option 总数不变;group 为空/组已不存在的主机归末尾「未分组」)
-    for (const g of groups) {
-      const hs = sshHostsCache.filter(h => (h.group || "") === g);
-      if (!hs.length) continue;
-      const og = document.createElement("optgroup");
-      og.label = g;
-      hs.forEach(h => og.appendChild(mkOpt(h)));
-      sel.appendChild(og);
-    }
-    const rest = sshHostsCache.filter(h => !groups.includes(h.group || ""));
-    if (rest.length) {
-      const og = document.createElement("optgroup");
-      og.label = "未分组";
-      rest.forEach(h => og.appendChild(mkOpt(h)));
-      sel.appendChild(og);
-    }
-  } else {
-    for (const h of sshHostsCache) sel.appendChild(mkOpt(h));
-  }
-  sel.value = sshHostsCache.some(h => h.id === cur) ? cur : "";
-}
+/* ---- 设置「连接」页:主机列表/表单/分组管理已 Vue 化,见 97-vue-ssh.js(renderSshHosts/saveSshHost/cancelSshHostEdit 在该文件定义);面板顶部的连接下拉/按钮排已整体移除(多终端只留标签条,连接走 /ssh 与设置页) ---- */
 

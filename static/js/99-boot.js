@@ -236,7 +236,7 @@ async function init() {
     e.stopPropagation();  // 终端独占按键:不冒泡,全局分发器/浮层(Esc 关抽屉等)不得再反应一次
     if (e.metaKey && !e.altKey && !e.ctrlKey && (e.key === "c" || e.key === "C") && copyTermSelection()) { e.preventDefault(); return; }   // 选中文字后 Cmd+C 拷贝(Mac 习惯;无选区不拦截)
     if (dispatchTermOkKeys(e)) return;  // termOk 命令(抓终端增量)优先
-    const d = termKeyData(e);
+    const d = termKeyData(e, termState);   // 带终端状态:DECCKM 开启时方向键改发 SS3 形态
     if (d != null) { termSend(d); e.preventDefault(); }
   });
   $("term-hidden").addEventListener("paste", (e) => {
@@ -259,7 +259,7 @@ async function init() {
     const actS = sshActive();
     if (e.key === "Escape" && !(actS && actS.state.alt) && opsAnyActive() && opsCancelArmed()) return;   // 无可视终端时也允许取消;仅备用屏(vim/top)内 Esc 是程序按键放行
     if (dispatchTermOkKeys(e)) return;  // termOk 命令(抓终端增量)优先
-    const d = termKeyData(e);
+    const d = termKeyData(e, actS && actS.state);   // 带视图终端状态:DECCKM 开启时方向键改发 SS3 形态
     if (d != null) { sshSend(d); e.preventDefault(); }
   });
   $("ssh-hidden").addEventListener("paste", (e) => {
@@ -269,10 +269,6 @@ async function init() {
     if (t) sshSend(t);
     e.preventDefault();
   });
-  $("ssh-host-sel").onchange = () => { const v = $("ssh-host-sel").value; if (v) sshConnect(v); };
-  $("ssh-reconn").onclick = sshReconnect;
-  $("ssh-master-close").onclick = sshMasterClose;
-  $("ssh-collapse").onclick = () => sshClosePanel();
   $("ssh-chip").onclick = () => sshTogglePanel();   // 开合逻辑收进 80-ssh.js,与 Cmd+4 同一份
   $("btn-save-ssh-host").onclick = saveSshHost;
   $("btn-cancel-ssh-host").onclick = cancelSshHostEdit;

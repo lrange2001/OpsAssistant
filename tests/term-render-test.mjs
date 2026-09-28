@@ -219,6 +219,67 @@ async function run(stream, cols = 80, rows = 10) {
   ok("cursor: no phantom space when flush at content end", lastD === "ab█", JSON.stringify(lastD));
 }
 
+/* ---------- 13. CSI 私有前缀(> < =):XTMODKEYS 等序列整段吞掉 ----------
+   vim 进/出插入模式发 \x1b[>4;2m / \x1b[>4;m(modifyOtherKeys 开关);旧解析的参数
+   字符集不含 >,\x1b[ 被吞后 ">4;2m" 当可打印文本画进屏幕(实测插入模式花屏)。 */
+{
+  const out = await run("A\x1b[>4;2mB\x1b[>4;mC\x1b[<1;2mD\x1b[=5hE");
+  ok("csi-priv: 私有前缀序列不漏成可打印文本", out.replace(/\s+$/, "") === "ABCDE", JSON.stringify(out));
+  const out2 = await page.evaluate(() => {
+    const st = termMakeState();
+    termFeed(st, "\x1b[>4;", 80, 10);   // 序列劈在两块边界:前半应扣留
+    termFeed(st, "2mOK", 80, 10);       // 后半拼上后整段消化
+    return screenRender(st.main, false);
+  });
+  ok("csi-priv: 私有序列跨块劈开仍整段吞掉", out2.includes("OK") && !out2.includes(";2m") && !out2.includes(">"), JSON.stringify(out2));
+  const tail = await page.evaluate(() => stripAnsi("pw\x1b[>4;2m for\x1b[>4;m: "));
+  ok("csi-priv: stripAnsi 剥私有前缀序列(tail 密码检测不受垃圾干扰)", tail === "pw for: ", JSON.stringify(tail));
+}
+
+/* ---------- 14. DECCKM(?1h/?1l)跟踪:方向键按应用模式切 SS3 编码 ----------
+   vim/readline 启动发 \x1b[?1h(smkx),期待方向键 ESC O A;退出发 ?1l 回 CSI。
+   严格按 terminfo 解析的 vim(kcuu1=\EOA)不认恒定的 ESC [ A,方向键全灭
+   (Enter=\r 不经 terminfo 独活)。?12h/?1000h 等不得误置位。 */
+{
+  const t = await page.evaluate(() => {
+    const st = termMakeState();
+    termFeed(st, "vim\r\n", 80, 10);
+    const before = st.app;
+    termFeed(st, "\x1b[?1049h\x1b[?1h", 80, 10);   // 进备用屏 + DECCKM 开(vim 启动序)
+    const on = st.app;
+    const k = (e, s) => { const d = termKeyData(e, s); return d == null ? null : Array.from(d).map(c => c.charCodeAt(0)); };
+    const mk = (key, extra = {}) => ({ key, preventDefault() {}, stopPropagation() {}, ...extra });
+    const ss3Up = k(mk("ArrowUp"), st);
+    const ss3Home = k(mk("Home"), st);
+    const enter = k(mk("Enter"), st);
+    const del = k(mk("Delete"), st);
+    const altUp = k(mk("ArrowUp", { altKey: true }), st);
+    termFeed(st, "\x1b[?1l\x1b[?1049l", 80, 10);   // vim 退出序:回 CSI
+    const off = st.app;
+    const csiUp = k(mk("ArrowUp"), st);
+    // ?1000h(鼠标上报)等含 "1" 前缀的模式不得误置位;劈块仍检出
+    const st2 = termMakeState();
+    termFeed(st2, "\x1b[?1000h\x1b[?12;25h", 80, 10);
+    const noFalse = st2.app;
+    const st3 = termMakeState();
+    termFeed(st3, "\x1b[?1", 80, 10);   // 序列劈在块尾
+    termFeed(st3, "h", 80, 10);         // 拼上后应置位
+    const splitDetected = st3.app;
+    return { before, on, ss3Up, ss3Home, enter, del, altUp, off, csiUp, noFalse, splitDetected };
+  });
+  ok("decckm: 初始关闭", t.before === false);
+  ok("decckm: ?1h 置位", t.on === true);
+  ok("decckm: 方向键改发 ESC O A", JSON.stringify(t.ss3Up) === "[27,79,65]", JSON.stringify(t.ss3Up));
+  ok("decckm: Home 改发 ESC O H", JSON.stringify(t.ss3Home) === "[27,79,72]", JSON.stringify(t.ss3Home));
+  ok("decckm: Enter/Delete 不受影响", JSON.stringify(t.enter) === "[13]" && JSON.stringify(t.del) === "[27,91,51,126]",
+     JSON.stringify(t.enter) + " " + JSON.stringify(t.del));
+  ok("decckm: Alt+方向键组合不受影响", t.altUp === null, JSON.stringify(t.altUp));
+  ok("decckm: ?1l 复位", t.off === false);
+  ok("decckm: 复位后方向键回 ESC [ A", JSON.stringify(t.csiUp) === "[27,91,65]", JSON.stringify(t.csiUp));
+  ok("decckm: ?1000h/?12h 不误置位", t.noFalse === false);
+  ok("decckm: 序列劈块仍检出", t.splitDetected === true);
+}
+
 await browser.close();
 console.log(results.join("\n"));
 console.log(`\nterm-render: ${pass} pass, ${fail} fail`);

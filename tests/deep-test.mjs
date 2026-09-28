@@ -261,6 +261,34 @@ await t("send-错误流显示错误条", async () => {
   await page.waitForSelector(".error-tip", { timeout: 3000 });
   await page.evaluate(() => { window.__chatMode = "echo"; });
 });
+await t("send-流空转看门狗:上游停摆自动断开+提示+可立即重发", async () => {
+  await page.evaluate(() => { document.querySelector("#error-slot").replaceChildren(); });   // 清上一用例残留的错误条
+  await page.evaluate(() => {
+    window.FF_STREAM_IDLE_MS = 400;          // 看门狗窗口压到 400ms(默认 300s)
+    window.__chatScript = async () => {};    // 头已到、正文一个字节都不来:上游停摆现场
+  });
+  await input.fill("stall test");
+  await input.press("Enter");
+  await sleep(150);
+  eq(await page.locator("#btn-send").textContent(), "Stop", "挂起期间应为 Stop");
+  await page.waitForSelector(".error-tip", { timeout: 3000 });
+  chk(/无响应/.test(await page.locator(".error-tip").last().textContent()), "错误条应说明长时间无响应,实际: " + (await page.locator(".error-tip").last().textContent()).slice(0, 60));
+  await sleep(200);
+  eq(await page.locator("#btn-send").textContent(), "Send", "看门狗断开后恢复 Send");
+  await page.evaluate(() => {
+    window.FF_STREAM_IDLE_MS = 0;
+    window.__chatScript = async (push, close) => {
+      push({ type: "delta", content: "RECOVERED-77" });
+      push({ type: "done", reason: "stop", usage: { in: 1, out: 1 }, append_messages: [{ role: "assistant", content: "RECOVERED-77" }] });
+      close();
+    };
+  });
+  await input.fill("after stall");
+  await input.press("Enter");
+  await sleep(800);
+  chk((await page.locator("#messages").textContent()).includes("RECOVERED-77"), "断开后可立即重发并正常收到回复");
+  await page.evaluate(() => { window.__chatScript = null; });
+});
 
 /* ---------- 6. 排队 ---------- */
 await t("queue-生成中入队+自动流出", async () => {

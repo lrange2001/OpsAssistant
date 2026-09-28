@@ -455,7 +455,9 @@ async function loadDatadir() {
     el.title = j.dir || "";
     note.textContent = j.source === "env"
       ? "当前由环境变量 FF_DATA_DIR 指定(开发/测试实例),不能在这里修改。"
-      : (j.is_default ? "当前为缺省位置。" : "位置已由设置指定(指针文件生效)。");
+      : (j.dir && j.dir.startsWith("/tmp/"))
+        ? "位置在 /tmp 下,系统重启会清空数据(位置本身自动原址重建);重要数据请改到持久位置。"
+        : `位置记录在 ${j.config_path || "~/.assistant_config"},一次设置,重新编译/重启都沿用。`;
   } catch (e) {
     el.textContent = "";
     note.textContent = "读取失败: " + e.message;

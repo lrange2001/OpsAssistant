@@ -66,6 +66,15 @@ async function runTurn({ executePending = false, session = null } = {}) {
   if (!executePending) s.messages.push(live);
   if (s === curSession()) renderMessages();
 
+  // ops/aiops 资格重验:准入只在切换那一刻查过,隔天终端全断后粘性的终端型会话既无终端又无本地工具(变砖)。
+  // 发送前发现无在线终端即回落权限默认模式;终端重连后随时可再 /mode ops 或 /mode aiops
+  const m0 = (s.mode) || permMode;
+  if (isTermMode(m0) && !(typeof sshSessions !== "undefined" && sshSessions.some(x => x.alive))) {
+    const fb = (permMode && MODE_INFO[permMode] && !isTermMode(permMode)) ? permMode : "build";
+    s.mode = fb; persist(); renderModeRadios();
+    toast(m0 + " 模式已无在线 SSH 终端,本轮按 " + fb + " 处理(重连后可再 /mode " + m0 + ")", "warn");
+  }
+
   const body = {
     messages: toApiMessages(s),
     cwd: s.cwd || undefined,
@@ -143,6 +152,17 @@ async function runTurn({ executePending = false, session = null } = {}) {
     if (!liveEls) makeLiveDom();
   };
 
+  // 流空转看门狗:上游停摆时响应头已到但一个字节都不来,read() 永久挂起、UI 卡在生成态、
+  // 后续消息全发不出去(服务端已有 120s 读超时兜底,这里再保险一层覆盖 handler 整体卡死)。
+  // 任何收到的字节都重置;超时主动断流并按错误收尾,用户能看到原因并可立即重发。
+  // 声明在 try 之外:catch/finally 与 try 是平级块,放里面会 ReferenceError 连坐所有中止路径。
+  const idleMs = (+window.FF_STREAM_IDLE_MS) || 300000;
+  let idleTimer = null, streamStalled = false;
+  const idleKick = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { streamStalled = true; aborter.abort(); }, idleMs);
+  };
+
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
@@ -155,6 +175,7 @@ async function runTurn({ executePending = false, session = null } = {}) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
+    idleKick();   // 拿到响应头即布防:首字节迟迟不来也要有界等待
 
     const ensureBubble = () => {
       ensureLiveDom();
@@ -182,6 +203,7 @@ async function runTurn({ executePending = false, session = null } = {}) {
 
     while (true) {
       const { done, value } = await reader.read();
+      idleKick();   // 有字节(哪怕流结束)就证明链路活着
       if (done) break;
       buf += dec.decode(value, { stream: true });
       let idx;
@@ -276,7 +298,12 @@ async function runTurn({ executePending = false, session = null } = {}) {
             scrollBottom();
           }
           (live._results = live._results || {})[ev.id] = ev.result;  // DOM 缺失也照记,重渲染/中断后不丢
-          if ((ev.name === "ops_type" || ev.name === "ops_broadcast") && ev.result && ev.result.ok) opsArmFromResult(ev.result, s);   // ops:回车布防到放置的终端(单发 sid / 群发 targets,归属本回合会话)
+          if ((ev.name === "ops_type" || ev.name === "ops_broadcast") && ev.result && ev.result.ok) {   // ops:回车布防到放置的终端(单发 sid / 群发 targets,归属本回合会话)
+            if (ev.result.auto) {   // aiops 只读路径:命令已连同回车自动执行,无布防无等待条,提示即可
+              const who = ev.result.label || (ev.result.targets || []).map(t => t.label).join("、");
+              toast("aiops 只读命令已自动执行 · " + who + " · " + (ev.result.command || ""));
+            } else opsArmFromResult(ev.result, s);
+          }
           if (ev.name === "ops_read" && ev.result && ev.result.ok) opsWatchFromResult(ev.result, s);   // ops:按后端权威 busy 字段登记/解除长驻盯守(该终端里用户按 Ctrl-C 会通知助手)
         } else if (ev.type === "checkpoint") {
           // agent 修改文件前自动落的检查点
@@ -312,9 +339,17 @@ async function runTurn({ executePending = false, session = null } = {}) {
   } catch (err) {
     closeThink();
     if (err.name === "AbortError") {
-      outcome = "abort";
-      harvestStopped();
-      cleanupLive(s, live, true);
+      if (streamStalled) {   // 看门狗触发:不是用户按停,按错误收尾让原因可见
+        outcome = "error"; errMsg = "模型服务长时间无响应(" + Math.round(idleMs / 1000) + " 秒无数据),已自动断开 — 请重试";
+        showError(errMsg);
+        pauseQueue("error", s.id);
+        harvestStopped();
+        cleanupLive(s, live, false, true);
+      } else {
+        outcome = "abort";
+        harvestStopped();
+        cleanupLive(s, live, true);
+      }
     } else {
       // 断流(ZCode 断线提示):区分"还没开始"与"中途断流",中途断流保留部分回复
       outcome = "error"; errMsg = err.message;
@@ -325,6 +360,7 @@ async function runTurn({ executePending = false, session = null } = {}) {
       cleanupLive(s, live, false, true);
     }
   } finally {
+    if (idleTimer) clearTimeout(idleTimer);   // 看门狗随回合注销,不跨回合误杀
     setGenerating(false, s.id);   // 注销本回合并刷新发送键/占位符/会话列表
     opsRenderBar();   // ops:回合注销后重画——「读取输出中」chip 据此消失(done 时回合还在,画了会滞留);「等待回车」不受影响
     // 后台系统通知:完成 / 出错 / 等待确认(手动停止与转向不打扰);带会话,由通知方按会话路由

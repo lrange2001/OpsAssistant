@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""权限引擎:五模式(plan/build/edit/yolo/ops)、allow/deny 规则匹配与风险分级"""
+"""权限引擎:模式(plan/build/edit/yolo/ops/aiops)、allow/deny 规则匹配与风险分级"""
 
 import os
 import re
@@ -12,7 +12,7 @@ _DANGER_CMD = re.compile(
     r"chmod\s+-R\s+0?777\s+/|mv\s+/\S+\s+/dev/)",
     re.IGNORECASE)
 
-PERMISSION_MODES = ("plan", "build", "edit", "yolo", "ops")
+PERMISSION_MODES = ("plan", "build", "edit", "yolo", "ops", "aiops")
 
 
 def rule_matches(rules, kind, value, cwd=None):
@@ -71,8 +71,8 @@ def permission_decision(mode, name, args, cfg, cwd=None):
             return "auto"
         if mode == "yolo" or mode == "edit":
             return "auto"
-        if mode == "build":
-            return "ask"
+        if mode in ("build", "ops", "aiops"):
+            return "ask"  # ops/aiops 本地写同 build:审批卡人工确认(终端侧的人审是回车,本地写的人审是卡片)
         return "deny"  # plan:禁写
     return "auto"  # 只读工具
 

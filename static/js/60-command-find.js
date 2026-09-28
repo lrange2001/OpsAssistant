@@ -19,7 +19,7 @@ const CMK_ACTIONS = [
   { name: "Automations", ds: "Scheduled tasks", run: () => openSettingsTab("auto") },
   { name: "Subagents", ds: "Manage task agents", run: () => openSettingsTab("agents") },
   { name: "Permission rules", ds: "Allow / deny lists", run: () => openSettingsTab("perm") },
-  { name: "Connect server", ds: "SSH terminal beside the chat", run: () => { sshOpenPanel(); if (!sshChatTabs().length) $("ssh-host-sel").focus(); } },
+  { name: "Connect server", ds: "SSH terminal beside the chat", run: () => sshConnect("") },
   { name: "Grab terminal tail", ds: "Quote new terminal output into the composer", run: () => termQuoteTail() },
 ];
 let cmkItems = [], cmkActive = 0;

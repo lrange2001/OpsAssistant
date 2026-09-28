@@ -1,7 +1,7 @@
 "use strict";
 /* ===== 设置「连接」页(Vue 组件):主机列表卡(分组 chips 真筛选)+ 弹出式主机编辑卡 + 轻量分组管理 ===== */
 /* 迁自 80-ssh.js「设置「连接」页」小节(renderSshHosts/saveSshHost/cancelSshHostEdit/editingSshHost);
-   renderSshHostSel 留在 80-ssh.js(顶部面板下拉与 /ssh 共用)。
+   renderSshHostSel(面板连接下拉)已随工具条整排移除,不再存在。
    挂载模式:模块加载不挂载;全局 renderSshHosts() 首次调用时 createApp().mount("#vue-ssh-conn"),
    之后每次调用只触发组件 reload()(重新 fetch /api/ssh/hosts 刷新响应式数据)。 */
 /* 结构说明:DOM 顺序为 分组管理 → 编辑卡 → 主机卡,视觉顺序用 CSS flex order 排成
@@ -192,7 +192,6 @@ const SshConnApp = {
       if (this.filter !== "__all" && this.filter !== "__ungrouped" && !this.groups.includes(this.filter)) this.filter = "__all";
       sshHostsCache = this.hosts;
       sshGroupsCache = this.groups;
-      renderSshHostSel();
     },
     /* ---- 编辑卡开合 ---- */
     openAdd() {

@@ -61,6 +61,11 @@ class TermSession:
         self.last_ts = time.time()
         self.exited = None
         self.lock = threading.Lock()
+        # 写入队列:write() 只入队即返回(长文本不再把 HTTP 线程挂在写满的 PTY 上),
+        # 专职 _writer 线程分块循环写,顺序由单队列保证
+        self._wq = deque()
+        self._wq_cond = threading.Condition()
+        self._wq_open = True
         self.argv = argv or ["/bin/zsh", "-l"]
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
@@ -77,6 +82,7 @@ class TermSession:
         self._set_winsize(cols, rows)
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._waiter, daemon=True).start()
+        threading.Thread(target=self._writer, daemon=True).start()
 
     def _set_winsize(self, cols, rows):
         try:
@@ -127,12 +133,38 @@ class TermSession:
             pass
 
     def write(self, data):
-        if self.exited is None:
-            self.input_bytes += len(data.encode("utf-8"))
-            try:
-                os.write(self.fd, data.encode("utf-8"))
-            except OSError:
-                pass
+        """入队即返回:单次裸 os.write 在长文本下有截断(部分写返回值被丢)与挂死(阻塞式 fd 写满)
+        双重坑,改由 _writer 分块循环写;会话已死直接丢弃"""
+        if self.exited is not None:
+            return
+        b = data.encode("utf-8")
+        if not b:
+            return
+        self.input_bytes += len(b)
+        with self._wq_cond:
+            self._wq.append(b)
+            self._wq_cond.notify()
+
+    def _writer(self):
+        """专职写入线程:按 4 KiB 分块、循环消费部分写;阻塞式 fd 的背压只挂本线程,不再挂 HTTP 线程。
+        会话退出/dispose/EIO 都弃余量返回(死会话的键入本就不该再进 PTY)"""
+        while True:
+            with self._wq_cond:
+                while not self._wq:
+                    if not self._wq_open or self.exited is not None:
+                        return
+                    self._wq_cond.wait(0.2)
+                    if not self._wq_open or self.exited is not None:
+                        return
+                item = self._wq.popleft()
+            off = 0
+            while off < len(item):
+                if self.exited is not None:
+                    return
+                try:
+                    off += os.write(self.fd, item[off:off + 4096])
+                except OSError:
+                    return
 
     def buffer_slice(self, offset, max_bytes):
         """按字节序号取 hist 窗口,返回剥 ANSI + 光标折叠后的纯文本(offset 协议见方案 8.2):
@@ -229,6 +261,10 @@ class TermSession:
         return b"".join(chunks).decode("utf-8", "replace")
 
     def dispose(self):
+        with self._wq_cond:   # 先关写入队列:writer 线程及时退出,排队中的余量一并弃掉
+            self._wq_open = False
+            self._wq.clear()
+            self._wq_cond.notify_all()
         if self.exited is None:
             try:
                 os.kill(self.pid, signal.SIGHUP)

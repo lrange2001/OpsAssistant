@@ -16,7 +16,7 @@ from .bashjobs import bash_job_read, bash_job_start, bash_jobs_snapshot
 from .checkpoints import checkpoint_detail, create_checkpoint, delete_checkpoint, list_checkpoints, restore_checkpoint
 from .compact import api_compact, api_git_ai_message, api_title
 from .config import api_datadir_set, load_config, save_config
-from .datadir import DEFAULT_DATA_DIR, HERE
+from .datadir import DEFAULT_DATA_DIR, HERE, USER_CONFIG_PATH
 from .gitpanel import _git, git_branches, git_checkout, git_diff, git_discard, git_log, git_push, git_stage, git_status, git_unstage
 from .library import active_skill_names, agents_md_text, api_commands_save, load_custom_commands, load_memories, load_skills, load_subagents, skills_prompt_text
 from .mcp import MCP
@@ -28,7 +28,7 @@ from .ssh import SSHS, _bad_text, _ssh_spec_from_body, api_ssh_groups_save, api_
 from .term import TERMS
 from .textutil import _trunc, dir_hints, fix_arguments, strip_emoji
 from .tools_builtin import TOOL_DEFS, TOOL_IMPL, tool_list_dir, tool_read_file
-from .ops import OPS_TOOL_NAMES, build_ops_system_block, ops_plan_gate, ops_register, ops_result_text
+from .ops import OPS_TOOL_NAMES, build_ops_system_block, classify_readonly, ops_plan_gate, ops_register, ops_result_text
 from .usage import log_usage, usage_summary
 
 # ops 模式工具注册:模块加载即挂入全局工具表(与 tools_extra 的注册同相位)
@@ -57,6 +57,10 @@ def _writable_dir(d):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # keep-alive 空闲上限(套接字读超时):到点服务端干净关连接,线程即时回收;WebKit 掐断
+    # 空闲连接的竞态也不再向日志刷 ConnectionReset traceback(此前几分钟几万行)。
+    # 只约束「等下一条请求」的读,流式响应的写不受影响。
+    timeout = 65
 
     def log_message(self, fmt, *args):
         pass  # 静默访问日志
@@ -175,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/datadir":
             self._json({"ok": True, "dir": datadir.DATA_DIR, "is_default": datadir.DATA_DIR == DEFAULT_DATA_DIR,
                         "source": datadir.DATA_DIR_SOURCE, "default_dir": DEFAULT_DATA_DIR,
+                        "config_path": USER_CONFIG_PATH,
                         "restart_hint": "应用并迁移后,重启应用才会完全切换到新位置"})
         elif path == "/api/open-datadir":
             os.makedirs(datadir.DATA_DIR, exist_ok=True)
@@ -396,6 +401,8 @@ class Handler(BaseHTTPRequestHandler):
             s = TERMS.get(body.get("sid") or "")
             if not s:
                 self._json({"ok": False, "error": "会话不存在"}, 404)
+            elif s.exited is not None:
+                self._json({"ok": False, "error": "会话已退出"})
             else:
                 s.write(body.get("data") or "")
                 self._json({"ok": True})
@@ -458,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             s = SSHS.get(body.get("sid") or "")
             if not s:
                 self._json({"ok": False, "error": "会话不存在"}, 404)
+            elif s.exited is not None:
+                self._json({"ok": False, "error": "会话已退出"})
             else:
                 s.write(body.get("data") or "")
                 self._json({"ok": True})
@@ -772,11 +781,11 @@ class Handler(BaseHTTPRequestHandler):
             "# currentDate\nToday's date is " + time.strftime("%A, %B %d, %Y") + ".")
         extra_system = (extra_system + "\n\n" if extra_system else "") + "输出规范:任何回复中都严格禁止出现 emoji 表情符号,一个都不许有。"
         auto_approve = bool(body.get("auto_approve", True))
-        # 权限模式(ZCode:plan/build/edit/yolo/ops);没带 mode 时按旧 auto_approve 语义映射
+        # 权限模式(ZCode:plan/build/edit/yolo/ops/aiops);没带 mode 时按旧 auto_approve 语义映射
         mode = body.get("mode") or ("yolo" if auto_approve else "build")
-        # ops 协议块必须在 sanitize_messages 之前并入 extra_system(首条 system 在此固化,事后追加无效)
-        if mode == "ops":
-            extra_system = (extra_system + "\n\n" if extra_system else "") + build_ops_system_block()
+        # ops/aiops 协议块必须在 sanitize_messages 之前并入 extra_system(首条 system 在此固化,事后追加无效)
+        if mode in ("ops", "aiops"):
+            extra_system = (extra_system + "\n\n" if extra_system else "") + build_ops_system_block(aiops=(mode == "aiops"))
         messages = sanitize_messages(body.get("messages") or [], extra_system=extra_system)
         params = body.get("params") or {}
         tools_enabled = bool(body.get("tools_enabled", True))
@@ -787,10 +796,14 @@ class Handler(BaseHTTPRequestHandler):
         all_tools = TOOL_DEFS + (MCP.tool_defs() if tools_enabled else [])
         if not tools_enabled:
             all_tools = []
-        if mode == "ops":
+        if mode in ("ops", "aiops"):
             # ops 四工具是模式本体,不随「工具」开关关停(开关只管常规工具与 MCP),且其余工具不进本轮工具表;
-            # 唯一例外:skill(排障手册)随开关放行——开关关着时连技能也不进表;工具表为空时模型只能照系统块"口述"调用
-            names = set(OPS_TOOL_NAMES) | ({"skill"} if tools_enabled else set())
+            # 唯一例外:skill(排障手册)随开关放行——开关关着时连技能也不进表;工具表为空时模型只能照系统块"口述"调用。
+            # 本地 Mac 文件工具同样随开关放行:连着 SSH 也得能处理本机文件(读自动执行、写走审批卡);
+            # run_shell 不进表——本地 shell 与 ops 语义不符,远程命令仍只经终端 + 用户回车人审
+            names = set(OPS_TOOL_NAMES)
+            if tools_enabled:
+                names |= {"skill", "read_file", "list_dir", "grep", "glob", "write_file", "edit_file"}
             all_tools = [t for t in TOOL_DEFS if t["function"]["name"] in names]
 
         append_messages = []
@@ -823,14 +836,17 @@ class Handler(BaseHTTPRequestHandler):
                 args = {**args, "cwd": session_cwd}
             return args
 
-        def dispatch_tool(name, args):
+        def dispatch_tool(name, args, ops_auto=False):
             if name in TOOL_IMPL:
+                # aiops 只读判定通过:连同回车一起执行(免人审);auto 只对 ops_type/ops_broadcast 有意义
+                if ops_auto and name in ("ops_type", "ops_broadcast"):
+                    return TOOL_IMPL[name](args, auto=True)
                 return TOOL_IMPL[name](args)
             if name.startswith("mcp_"):
                 return MCP.call(name, args)
             return {"ok": False, "error": f"未知工具: {name}"}
 
-        def dispatch_with_progress(call, name, args):
+        def dispatch_with_progress(call, name, args, ops_auto=False):
             """执行期间把 tool_run_shell 的进度回调转成 tool_progress 事件推给客户端"""
             tid = call.get("id")
 
@@ -839,7 +855,7 @@ class Handler(BaseHTTPRequestHandler):
 
             _progress_ctx.sink = sink
             try:
-                return dispatch_tool(name, args)
+                return dispatch_tool(name, args, ops_auto=ops_auto)
             finally:
                 _progress_ctx.sink = None
 
@@ -859,10 +875,15 @@ class Handler(BaseHTTPRequestHandler):
                     decision = "deny" if decision == "deny" else "ask"
                 if name in OPS_TOOL_NAMES:
                     decision = "auto"  # ops 工具只打字/只读探测,永不出审批卡,回车即人审
-                elif mode == "ops" and name == "skill":
+                elif mode in ("ops", "aiops") and name == "skill":
                     decision = "auto"  # ops 模式下的技能加载是纯读文本,不打审批卡打断回车循环
+                # aiops 免回车判定:整条命令命中只读白名单才连同回车自动执行;记在 plan 上
+                # (不进 args/事件)避免 auto 标志泄漏进前端 tool_call 渲染
+                ops_auto = bool(mode == "aiops" and name in ("ops_type", "ops_broadcast")
+                                and classify_readonly(str(args.get("command") or "")))
                 plan.append({"call": call, "name": name, "args": args,
-                             "decision": decision, "risk": risk_level(name, args)})
+                             "decision": decision, "risk": risk_level(name, args),
+                             "ops_auto": ops_auto})
             return plan
 
         def execute_plan(plan):
@@ -886,17 +907,19 @@ class Handler(BaseHTTPRequestHandler):
                 elif p.get("decision") == "deny":
                     r = {"ok": False, "status": "denied", "error": "该操作被拒绝规则禁止(可在 设置 > 权限 调整)"}
                 elif name in ("ops_type", "ops_broadcast"):
-                    # ops 一轮一批:本轮已放置过(或静态校验不过)在此拦下,等输出再决定下一步
-                    gate_err = ops_plan_gate(p["args"], ops_armed_sids)
+                    # ops 一轮一批:本轮已放置过(或静态校验不过)在此拦下,等输出再决定下一步;
+                    # aiops 的只读自动执行不占 armed 名额(传空 used 集只做静态校验),排查可连续推进
+                    gate_err = ops_plan_gate(p["args"], set() if p.get("ops_auto") else ops_armed_sids)
                     if gate_err:
                         r = {"ok": False, "error": gate_err}
                     else:
                         try:
-                            r = dispatch_with_progress(call, name, p["args"])
+                            r = dispatch_with_progress(call, name, p["args"], ops_auto=p.get("ops_auto"))
                         except Exception as e:
                             r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-                    if r.get("ok"):
-                        # 广播回 targets 数组、单发回 sid:放进的本轮都记入 armed(强制收轮按非空判定)
+                    if r.get("ok") and not r.get("auto"):
+                        # 广播回 targets 数组、单发回 sid:放进的本轮都记入 armed(强制收轮按非空判定);
+                        # auto=True(只读已直接执行)不记——不强制收轮,模型接着 ops_read 再放下一条
                         sids = [r["sid"]] if r.get("sid") else [t.get("sid") for t in (r.get("targets") or [])]
                         for sid_ in sids:
                             if sid_:
@@ -1002,8 +1025,8 @@ class Handler(BaseHTTPRequestHandler):
                           "append_messages": append_messages})
                     return
                 execute_plan(plan)
-                if mode == "ops" and ops_armed_sids:
-                    # ops 已放置命令:强制收轮,等用户回车后的 [Ops] 触发消息再来
+                if mode in ("ops", "aiops") and ops_armed_sids:
+                    # ops/aiops 已放置待回车命令:强制收轮,等用户回车后的 [Ops] 触发消息再来
                     log_turn_usage()
                     emit({"type": "done", "reason": "ops_armed", "usage": usage_total,
                           "append_messages": append_messages})

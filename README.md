@@ -48,7 +48,7 @@ zsh start.sh 8090          # 等价于 python3 server.py --port 8090
 open http://127.0.0.1:8090
 ```
 
-> 注意:不设 `FF_DATA_DIR` 时数据目录缺省 `~/ForFreedom`;想隔离试用请 `FF_DATA_DIR=/tmp/ff-demo zsh start.sh 8090`。
+> 注意:不设 `FF_DATA_DIR` 时数据目录缺省 `/tmp/assisdata`(位置记录在 `~/.assistant_config`,设置页可改并整体迁移);想隔离试用请 `FF_DATA_DIR=/tmp/ff-demo zsh start.sh 8090`。
 
 ### 方式二:编译成 Mac 应用(.app)
 

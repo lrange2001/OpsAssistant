@@ -163,12 +163,12 @@ const HELPERS = `(() => {
       return [...root.querySelectorAll("button")].find(b => b.id !== "btn-save-ssh-host" &&
         /^(新建|添加|创建)/.test((b.textContent || "").trim())) || null;
     },
-    // 主机表单的分组下拉:ssh 设置页内除面板下拉与密钥卡外的 select,优先选项含组名者
+    // 主机表单的分组下拉:ssh 设置页内除密钥卡外的 select,优先选项含组名者
     groupSelect() {
       const page = this.sshPage();
       if (!page) return null;
       const keysCard = this.keysCard();
-      const cands = [...page.querySelectorAll("select")].filter(s => s.id !== "ssh-host-sel" && !(keysCard && keysCard.contains(s)));
+      const cands = [...page.querySelectorAll("select")].filter(s => !(keysCard && keysCard.contains(s)));
       const gs = window.__s2.groups || [];
       return cands.find(s => [...s.options].some(o => gs.some(g => (o.value || "") === String(g) || (o.textContent || "").trim() === String(g)))) ||
              cands[0] || null;
@@ -328,28 +328,22 @@ async function run(browser) {
     ok("回归: #btn-save-ssh-host 保活(可点击且已发出保存请求)", st.save && !!lastPost);
   });
 
-  /* 用例6 /ssh 面板下拉:有分组时输出 optgroup 且 option 总数=主机数 */
-  await step("用例6 /ssh 面板下拉 optgroup", async () => {
+  /* 用例6 /ssh 面板:面板可开,顶部连接工具条(下拉/Reconnect/Close link/Hide)已整排移除 */
+  await step("用例6 /ssh 面板与工具条移除", async () => {
     await page.evaluate(() => { const b = document.querySelector("#drawer-close"); if (b) b.click(); });
     await sleep(400);
     await input.fill("/ssh");
     await input.press("Enter");
     await sleep(900);
-    const st = await page.evaluate(() => {
-      const S = window.__s2;
-      const ids = S.hosts.map(h => h.id);
-      const sel = document.querySelector("#ssh-host-sel");
-      const opts = sel ? [...sel.options] : [];
-      return {
-        panelOpen: !!document.querySelector("#ssh-panel") && document.querySelector("#ssh-panel").classList.contains("open"),
-        optgroups: sel ? sel.querySelectorAll("optgroup").length : 0,
-        hostOpts: opts.filter(o => ids.includes(o.value)).length,
-        hostsN: S.hosts.length,
-      };
-    });
+    const st = await page.evaluate(() => ({
+      panelOpen: !!document.querySelector("#ssh-panel") && document.querySelector("#ssh-panel").classList.contains("open"),
+      rowGone: !document.querySelector("#ssh-host-sel") && !document.querySelector("#ssh-reconn") &&
+        !document.querySelector("#ssh-master-close") && !document.querySelector("#ssh-collapse"),
+      add: !!document.querySelector("#ssh-tabs .ssh-tab-add"),
+    }));
     ok("面板: /ssh 打开面板", st.panelOpen);
-    ok("面板: 有分组时下拉输出 optgroup", st.optgroups >= 1, "optgroups=" + st.optgroups);
-    ok("面板: 下拉主机 option 总数=主机数", st.hostsN > 0 && st.hostOpts === st.hostsN, JSON.stringify(st));
+    ok("面板: 连接工具条整排移除", st.rowGone, JSON.stringify(st));
+    ok("面板: 标签条与 + 保留", st.add);
   });
 
   /* 用例7 密钥卡:列表/复制公钥/填入表单/生成/删除 */

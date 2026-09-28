@@ -175,7 +175,7 @@ function opsPersist() {
 /* 切回 ops 会话 / 进入 ops 模式 / 刷新还原的共通落点:当前会话还有等待回车的终端时,
    面板直接切过去(待你回车的命令就在眼前);skipFocus——布防命令停在输入行,焦点进终端会把随后的打字拼进命令 */
 function opsFollowArmed() {
-  if (curMode() !== "ops") return;
+  if (!isTermMode(curMode())) return;
   const mine = Array.from(OPS.armed.values()).find(a => a.owner === curId);
   if (mine) sshSwitchToSid(mine.sid, true);
 }

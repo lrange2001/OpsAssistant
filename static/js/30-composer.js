@@ -212,8 +212,7 @@ async function handleSlashCommand(raw) {
     case "ssh": {
       if (!rest) {
         sshOpenPanel();
-        if (!sshChatTabs().length) $("ssh-host-sel").focus();
-        localMsg("SSH panel is open — pick a host in the left panel, or connect directly with `/ssh <name>`. Each connection opens its own terminal tab. Manage hosts in Settings > 连接.");
+        localMsg("SSH panel is open — connect directly with `/ssh <name>` (or Settings > 连接). Each connection opens its own terminal tab.");
         break;
       }
       try {
@@ -251,7 +250,7 @@ async function handleSlashCommand(raw) {
       try {
         const j = await (await fetch("/api/ssh/hosts")).json();
         const hs = j.hosts || [];
-        sshHostsCache = hs; renderSshHostSel();
+        sshHostsCache = hs;
         localMsg(hs.length
           ? "**SSH hosts**\n\n" + hs.map(h => `- **${h.label || h.host}** — \`${h.user || "-"}@${h.host}:${h.port || 22}\`${h.jump ? " via `" + h.jump + "`" : ""}${h.notes ? " — " + h.notes : ""}`).join("\n")
             + "\n\nConnect with `/ssh <name>`; manage in Settings > 连接."

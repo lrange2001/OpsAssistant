@@ -4,6 +4,7 @@
 import argparse
 import atexit
 import os
+import sys
 import threading
 from http.server import ThreadingHTTPServer
 from . import config, datadir
@@ -13,6 +14,18 @@ from .mcp import MCP
 from .provider import load_ccswitch_provider
 from .ssh import SSHS, _cm_dir
 from .term import TERMS
+
+
+class QuietHTTPServer(ThreadingHTTPServer):
+    """handle_error 默认打整段 traceback:客户端掐断 keep-alive 连接的竞态每次都刷
+    ConnectionResetError,几分钟灌满日志。常规断连压成单行,其余异常保留完整现场。"""
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+            print(f"[http] 客户端断开 {client_address}(keep-alive 竞态,已忽略)")
+            return
+        super().handle_error(request, client_address)
 
 # ---- split body (verify: 勿动本行以上) ----
 def main():
@@ -55,7 +68,7 @@ def main():
     cc = load_ccswitch_provider()
     # bind_and_activate=False:跳过构造器里的重复 bind,接管上面预绑定的 socket
     # (端口此刻已 listen,真正开始应答仍在本行之后,与原行为一致)
-    srv = ThreadingHTTPServer((args.host, args.port), Handler, bind_and_activate=False)
+    srv = QuietHTTPServer((args.host, args.port), Handler, bind_and_activate=False)
     srv.socket.close()
     srv.socket = sock
     print("=" * 60)

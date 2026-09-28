@@ -2,6 +2,7 @@
 """Anthropic 协议:payload 组装、流式请求、消息清洗"""
 
 import json
+import socket
 import urllib.request
 from .textutil import fix_arguments
 
@@ -93,44 +94,53 @@ def stream_chat(provider, messages, params, tools):
     )
     tool_blocks = {}  # content block index -> {"id","name","input_json"}
     usage = {"in": 0, "out": 0}
-    with urllib.request.urlopen(req, timeout=900) as resp:
-        for raw_line in resp:
-            line = raw_line.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            try:
-                ev = json.loads(line[5:].strip())
-            except json.JSONDecodeError:
-                continue
-            et = ev.get("type")
-            if et == "message_start":
-                u = (ev.get("message") or {}).get("usage") or {}
-                usage["in"] += u.get("input_tokens") or 0
-                usage["out"] += u.get("output_tokens") or 0
-            elif et == "content_block_start":
-                blk = ev.get("content_block") or {}
-                if blk.get("type") == "tool_use":
-                    tool_blocks[ev.get("index", 0)] = {"id": blk.get("id", ""), "name": blk.get("name", ""), "input_json": ""}
-            elif et == "content_block_delta":
-                d = ev.get("delta") or {}
-                if d.get("type") == "text_delta" and d.get("text"):
-                    yield {"t": "delta", "c": d["text"]}
-                elif d.get("type") == "thinking_delta" and d.get("thinking"):
-                    yield {"t": "reasoning", "c": d["thinking"]}
-                elif d.get("type") == "input_json_delta":
-                    slot = tool_blocks.get(ev.get("index", 0))
-                    if slot is not None:
-                        slot["input_json"] += d.get("partial_json") or ""
-            elif et == "message_delta":
-                u = ev.get("usage") or {}
-                usage["out"] = max(usage["out"], u.get("output_tokens") or 0)
-                sr = (ev.get("delta") or {}).get("stop_reason")
-                if sr:
-                    yield {"t": "finish", "v": sr}
-            elif et == "message_stop":
-                break
-            elif et == "error":
-                raise RuntimeError("模型服务流式错误:" + json.dumps(ev.get("error") or {}, ensure_ascii=False)[:1500])
+    # 读超时:套接字级(连接 + 每次读各计时)。流式正常时字节持续到达,远达不到上限;
+    # 上游停摆(网络/代理断流)时旧值 900s 会让 handler 干等 15 分钟,期间客户端一个
+    # chunk 都收不到 —— 用户侧表现为「消息永远发不出去」。默认 120s,provider 可覆写(测试用)。
+    timeout_s = float(provider.get("stream_timeout") or 120)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    ev = json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                et = ev.get("type")
+                if et == "message_start":
+                    u = (ev.get("message") or {}).get("usage") or {}
+                    usage["in"] += u.get("input_tokens") or 0
+                    usage["out"] += u.get("output_tokens") or 0
+                elif et == "content_block_start":
+                    blk = ev.get("content_block") or {}
+                    if blk.get("type") == "tool_use":
+                        tool_blocks[ev.get("index", 0)] = {"id": blk.get("id", ""), "name": blk.get("name", ""), "input_json": ""}
+                elif et == "content_block_delta":
+                    d = ev.get("delta") or {}
+                    if d.get("type") == "text_delta" and d.get("text"):
+                        yield {"t": "delta", "c": d["text"]}
+                    elif d.get("type") == "thinking_delta" and d.get("thinking"):
+                        yield {"t": "reasoning", "c": d["thinking"]}
+                    elif d.get("type") == "input_json_delta":
+                        slot = tool_blocks.get(ev.get("index", 0))
+                        if slot is not None:
+                            slot["input_json"] += d.get("partial_json") or ""
+                elif et == "message_delta":
+                    u = ev.get("usage") or {}
+                    usage["out"] = max(usage["out"], u.get("output_tokens") or 0)
+                    sr = (ev.get("delta") or {}).get("stop_reason")
+                    if sr:
+                        yield {"t": "finish", "v": sr}
+                elif et == "message_stop":
+                    break
+                elif et == "error":
+                    raise RuntimeError("模型服务流式错误:" + json.dumps(ev.get("error") or {}, ensure_ascii=False)[:1500])
+    except (socket.timeout, TimeoutError) as e:
+        # py3.9 的读超时是 socket.timeout(OSError 子类,不是 URLError):不转译的话一路抛到
+        # handle_chat 的兜底 except,用户看到的是生硬的「内部错误: timed out」且已等了整段超时
+        raise RuntimeError(f"模型服务 {timeout_s:.0f} 秒无数据(连接停滞),已断开本轮;请检查网络/代理后重试") from e
     yield {"t": "usage", "v": usage}
     # 工具调用一次性补发(agent_loop 的按 index 累积逻辑天然兼容)
     for i, slot in sorted(tool_blocks.items()):

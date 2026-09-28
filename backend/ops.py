@@ -5,6 +5,8 @@ ops_type 只把一条命令放进指定终端的输入行(绝不代按回车),�
 用户回车后前端发 [Ops] 触发消息,AI 立即用 ops_read 读取该终端的输出增量。
 ops_broadcast 把同一条命令放进多台终端输入行(逐台回车,同机分组只放一台);
 ops_facts 经 ControlMaster 复用通道跑固定只读探测命令,产出主机画像并缓存(无需回车)。
+aiops 变体:纯排查命令经 classify_readonly 白名单判定后连同回车一起自动执行(免人审),
+任何写入/变更命令仍走 ops 原路径——只放输入行等用户回车。
 字节游标按 sid 记在 OPS_CURSORS(ops_read 单一消费者),读多少推进多少,不重复。
 终端清单按「主机地址:端口」分组:同组 = 同一台机器(同机多开),只在组内一台放命令。
 
@@ -15,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from . import datadir
@@ -216,7 +219,443 @@ def check_ops_command(cmd):
     return None
 
 
-def tool_ops_type(a):
+# ---------------------------- aiops 命令分类(写黑名单;默认自动执行,用户拍板 2026-09) ----------------------------
+# 这是防呆闸,不是安全边界:把「改变状态/内容不可判定」与「检查类」分开,前者走 ops 人审回车,
+# 后者免回车自动执行。哲学:默认放行——只有写动词黑名单(_RO_WRITE)、任意代码/SQL/远程执行类
+# (_RO_CODE,内容静态判不了)与危险结构(重定向写/命令替换/后台/子 shell)才转人审;
+# 未知诊断工具默认视为检查类放行。
+_RO_LEN_MAX = 600        # 超长命令不自动(拼接/混淆风险)
+# 无子命令结构、参数任意的只读命令(cd 也放行:只切目录不写盘,链式排查必需)
+_RO_PLAIN = {
+    "cd", "ps", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "ls", "ll",
+    "df", "du", "free", "uptime", "w", "who", "whoami", "id", "uname", "hostname", "pwd",
+    "env", "printenv", "date", "cal", "which", "whereis", "type", "wc", "cut", "sort", "uniq",
+    "awk", "sed", "tr", "column", "paste", "comm", "join", "diff", "cmp", "md5sum", "sha1sum",
+    "sha256sum", "sha512sum", "base64", "xxd", "od", "hexdump", "strings", "jq", "readlink",
+    "realpath", "dirname", "basename", "stat", "file", "lsof", "lsblk", "lscpu", "lsmod",
+    "lspci", "lsusb", "lsns", "lslocks", "pgrep", "getent", "dmesg", "journalctl", "ss",
+    "netstat", "ping", "ping6", "traceroute", "tracepath", "dig", "nslookup", "host", "arp",
+    "vmstat", "iostat", "mpstat", "sar", "echo", "printf", "seq", "sleep", "zcat", "history",
+    "alias", "nproc", "tty", "arch", "iptables-save",
+}
+# 子命令白名单:首个非选项 token 必须在集合内(选项指 - 开头的全局旗标)
+_RO_SUB = {
+    "systemctl": {"status", "show", "is-active", "is-enabled", "is-failed", "cat",
+                  "list-units", "list-unit-files", "list-sockets", "list-timers",
+                  "list-dependencies", "list-jobs", "get-default"},
+    "docker": {"ps", "images", "logs", "inspect", "stats", "top", "version", "info",
+               "port", "history", "diff", "exec"},   # exec 单列:负载命令递归判定(见 _ro_segment)
+    "podman": {"ps", "images", "logs", "inspect", "stats", "top", "version", "info",
+               "port", "history", "diff", "exec"},
+    "git": {"status", "log", "diff", "show", "blame", "ls-files", "rev-parse", "describe",
+            "reflog", "shortlog", "whatchanged"},
+    "ip": {"addr", "address", "a", "link", "l", "route", "r", "rule", "ru", "neigh", "n"},
+    "npm": {"ls", "list", "outdated"},
+    "pip": {"list", "show", "freeze"},
+    "pip3": {"list", "show", "freeze"},
+}
+# ip 的子命令白名单只锁首词,后续 token 还能出现管理动作(ip route add / ip link set)→ 出现即转人审
+_RO_MUTATION = {"add", "del", "delete", "flush", "set", "change", "replace", "create",
+                "remove", "enable", "disable", "start", "stop", "restart", "reload",
+                "kill", "drop", "clear"}
+# find 的执行/删除类动作(grep 排查场景高频,必须放行 -name/-mtime 等)
+_RO_FIND_DENY = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls")
+_RO_READ_RE = re.compile(r"^-[nvx]*[LS]?$")   # iptables 查看旗标(-L/-S/-vnL/-n/-v/-x)
+# 取值型全局旗标(旗标+取值成对跳过再找子命令):kubectl -n ns / git -C dir / systemctl -H h 等;
+# -o=value 连写形态不带独立取值,按普通旗标跳过。未列出的取值型旗标:取值被当子命令 → 人审(安全方向)
+_RO_FLAG_VAL = {
+    "kubectl": {"-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user", "--token",
+                "--as", "--cache-dir", "--client-key", "--client-certificate", "--certificate-authority",
+                "--request-timeout", "--tls-server-name", "-v", "--v"},
+    "git": {"-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"},
+    "docker": {"-H", "--host", "--context", "--config", "--log-level"},
+    "podman": {"--url", "--connection", "-c", "--config", "--log-level"},
+    "systemctl": {"-H", "--host", "-M", "--machine", "--root"},
+    "npm": {"-C", "--prefix", "--registry", "--userconfig", "--cache", "--proxy", "--https-proxy"},
+    "pip": {"-i", "--index-url", "--extra-index-url", "--proxy", "--trusted-host", "-r", "--requirement",
+            "-t", "--target", "--prefix", "--python", "--path", "--no-binary", "--only-binary"},
+    "pip3": {"-i", "--index-url", "--extra-index-url", "--proxy", "--trusted-host", "-r", "--requirement",
+             "-t", "--target", "--prefix", "--python", "--path", "--no-binary", "--only-binary"},
+    "ip": {"-n", "-netns"},
+}
+# kubectl 语义面大、读命令占绝大多数:按「内置动词全集 + 变更动词黑名单」判定(用户明确要求除修改
+# 资源外放行);未知动词(可能是 kubectl- 插件,能跑任意命令)不在全集 → 人审,不放行
+_KC_VERBS = {
+    "annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "certificate",
+    "cluster-info", "completion", "config", "cordon", "cp", "create", "debug", "delete", "describe",
+    "diff", "drain", "edit", "events", "exec", "explain", "expose", "get", "kustomize", "label", "logs",
+    "options", "patch", "plugin", "port-forward", "proxy", "replace", "rollout", "run", "scale", "set",
+    "taint", "top", "uncordon", "version", "wait",
+}
+_KC_MUT = {"annotate", "apply", "attach", "autoscale", "cordon", "cp", "create", "debug", "delete",
+           "drain", "edit", "expose", "label", "patch", "port-forward", "proxy", "replace",
+           "run", "scale", "set", "taint", "uncordon"}   # exec 不在内:负载命令递归判定(见 _ro_kubectl)
+# 带子动词的组:只放行只读子动词(certificate 的 approve/deny 均为变更,空集整组不放)
+_KC_SUB_RO = {"auth": {"can-i", "whoami"}, "certificate": set(),
+              "config": {"view", "get-contexts", "current-context"},
+              "rollout": {"history", "status"}, "plugin": {"list"}}
+# 无害重定向形态(fd 复制 2>&1、丢弃 >/dev/null、空 stdin </dev/null):整体剔除后再查 <>;
+# 其余重定向(写文件、读入任意文件——mysql < dump.sql 是导入写、进程替换)一律人审——
+# 含引号内的 >(awk '{print > "f"}' 是写文件),引号盲扫宁可错杀
+_RO_SAFE_REDIR = re.compile(r"(?:\d*(?:>&\d+|>>?\s*/dev/(?:null|stdout|stderr)\b)|<\s*/dev/null\b)")
+# 写动词黑名单:文件写删/权限/进程/服务启停/系统电源/磁盘文件系统/网络配置/包管理/用户/调度。
+# 这些动词明确改变系统状态,一律人审;mkfs.* 前缀在 fallback 里一并判
+_RO_WRITE = {
+    # 文件写/删/改与交互编辑器
+    "rm", "rmdir", "unlink", "mv", "cp", "ln", "install", "tee", "dd", "truncate", "shred",
+    "touch", "mkdir", "mknod", "mkfifo", "rename", "split", "csplit", "patch", "rsync", "scp", "sftp",
+    "gpg", "vim", "vi", "nano", "emacs", "ed", "pico",
+    # 权限/属性
+    "chmod", "chown", "chgrp", "chattr", "setfacl", "chacl",
+    # 进程/服务/电源
+    "kill", "pkill", "killall", "reboot", "shutdown", "halt", "poweroff", "init", "telinit",
+    "swapon", "swapoff", "modprobe", "rmmod", "insmod", "update-rc.d", "chkconfig",
+    "rc-service", "rc-update", "svc", "supervisorctl", "launchctl", "hostnamectl", "timedatectl",
+    # 磁盘/文件系统/LVM
+    "mkswap", "fdisk", "sfdisk", "cfdisk", "parted", "partprobe", "wipefs", "fsck", "e2fsck",
+    "resize2fs", "tune2fs", "debugfs", "mdadm", "blockdev", "cryptsetup", "btrfs", "zfs", "zpool",
+    "lvcreate", "lvremove", "lvrename", "lvextend", "lvreduce", "lvchange", "lvconvert",
+    "vgcreate", "vgremove", "vgextend", "vgreduce", "vgchange", "pvcreate", "pvremove", "pvchange",
+    "pvmove", "xfs_growfs", "xfs_repair",
+    # 网络配置
+    "ifconfig", "iwconfig", "iw", "nmcli", "nft", "iptables-restore", "ip6tables-restore",
+    # 包管理
+    "apt", "apt-get", "yum", "dnf", "apk", "pacman", "zypper", "snap", "flatpak", "brew",
+    "gem", "composer", "conda", "mamba", "pipx", "uv",
+    # 用户/调度/杂项
+    "useradd", "usermod", "userdel", "groupadd", "groupmod", "groupdel", "passwd", "chpasswd",
+    "adduser", "deluser", "visudo", "chage", "gpasswd", "newusers", "at", "batch",
+    "wall", "write", "mesg", "lp", "lpr", "lprm",
+}
+# 内容不可静态判定(参数即代码/SQL/远程执行/构建部署):一律人审(用户拍板)。
+# drop table 能藏在 -e 的字符串里,静态判不了就不自动
+_RO_CODE = {
+    "node", "deno", "bun", "ruby", "irb", "perl", "php", "lua", "luajit", "tclsh", "java",
+    "Rscript", "mysql", "mysqldump", "psql", "pg_dump", "pg_restore", "redis-cli", "redis-server",
+    "mongo", "mongosh", "sqlite3", "cqlsh", "sqlplus", "cockroach", "influx",
+    "clickhouse-client", "clickhouse-local", "etcdctl", "consul",
+    "nc", "ncat", "socat", "telnet", "ssh", "gdb", "lldb", "bpftrace",
+    "nsenter", "unshare", "su", "doas", "sudoedit", "eval", "source", ".", "exec", "expect",
+    "make", "cmake", "ninja", "go", "cargo", "mvn", "gradle", "ant", "dotnet", "bazel",
+    "ansible", "ansible-playbook", "ansible-pull", "puppet", "chef-client", "salt-call", "salt",
+    "terraform", "helm", "vagrant", "docker-compose", "minikube", "kind", "k9s",
+}
+_RO_CODE_RE = re.compile(r"^python\d*(?:\.\d+)?$")   # python / python3 / python3.11
+
+
+def _split_ops(s):
+    """按未加引号的 ; | && || 切成命令段(引号内的分隔符不切,awk 脚本里的 | 不误伤)。"""
+    parts, buf, q, i = [], [], None, 0
+    while i < len(s):
+        c = s[i]
+        if q:
+            buf.append(c)
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c in "\"'":
+            q = c
+            buf.append(c)
+            i += 1
+            continue
+        if s[i:i + 2] in ("&&", "||"):
+            parts.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        if c in ";|":
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def _unquoted_has(seg, chars):
+    """段内是否存在未加引号的指定字符(引号里的括号是字面量,如 awk 的 printf(...))。"""
+    q = None
+    for c in seg:
+        if q:
+            if c == q:
+                q = None
+            continue
+        if c in "\"'":
+            q = c
+            continue
+        if c in chars:
+            return True
+    return False
+
+
+def _ro_skip_flags(rest, flagval):
+    """跳过取值型全局旗标(与取值成对跳过)与布尔旗标,返回首个非旗标 token 的下标(越界=无子命令)。"""
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t in flagval and i + 1 < len(rest):
+            i += 2
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        return i
+    return i
+
+
+def _ro_payload(toks):
+    """exec 类负载命令(kubectl exec -- CMD / docker exec CTR CMD):拼回字符串按同一套只读判定递归查验。"""
+    if not toks:
+        return False
+    return all(_ro_segment(s.strip()) for s in _split_ops(" ".join(toks)))
+
+
+def _ro_git(toks):
+    """git 只读子命令;-C dir 等取值型全局旗标与取值一起跳过后再认子命令(git -C /srv status);
+    branch/tag/remote/stash 只认列表形态(后续 token 全是选项),config 只认查询旗标。"""
+    if len(toks) < 2:
+        return False
+    i = _ro_skip_flags(toks[1:], _RO_FLAG_VAL["git"])
+    if i >= len(toks) - 1:
+        return False
+    rest = toks[1:][i:]
+    sub, tail = rest[0], rest[1:]
+    if sub in ("branch", "tag", "remote", "stash"):
+        return all(t.startswith("-") for t in tail)
+    if sub == "config":
+        return bool(tail) and tail[0] in ("-l", "--list", "--get", "--get-all", "--get-regexp")
+    return sub in _RO_SUB["git"]
+
+
+def _ro_kubectl(toks):
+    """kubectl:内置动词全集 + 变更黑名单(读动词占绝大多数,全集外即插件/拼错 → 人审)。
+    exec 递归判定容器内负载命令(负载只读才放行);auth/config/rollout/plugin 只认只读子动词。"""
+    rest = toks[1:]
+    i = _ro_skip_flags(rest, _RO_FLAG_VAL["kubectl"])
+    if i >= len(rest):
+        return False
+    sub = rest[i]
+    if sub not in _KC_VERBS or sub in _KC_MUT:
+        return False
+    if sub == "exec":
+        tail = rest[i + 1:]
+        if "--" in tail:
+            payload = tail[tail.index("--") + 1:]
+        else:
+            j = _ro_skip_flags(tail, {"-c", "--container"})   # 旧形态:首非旗标是 Pod 名,其后是负载
+            payload = tail[j + 1:] if j < len(tail) else []
+        return _ro_payload(payload)
+    if sub in _KC_SUB_RO:
+        tail = rest[i + 1:]
+        j = _ro_skip_flags(tail, ())
+        return j < len(tail) and tail[j] in _KC_SUB_RO[sub]
+    return True
+
+
+def _ro_segment(seg):
+    """单个命令段(无管道/分号)的白名单判定。"""
+    if not seg or not seg.strip():
+        return False
+    try:
+        toks = shlex.split(seg)
+    except ValueError:
+        return False   # 引号不配对等:不猜,人审
+    if not toks:
+        return False
+    i = 0
+    while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
+        i += 1   # 环境变量前缀 VAR=x 透明
+    if i < len(toks) and toks[i] == "sudo":
+        i += 1   # sudo / sudo -n / sudo -u <user> 透明;其余 sudo 形态(-i 等)不自动
+        if i < len(toks) and toks[i] == "-n":
+            i += 1
+        elif i + 1 < len(toks) and toks[i] == "-u":
+            i += 2
+    if i < len(toks) and toks[i] == "timeout":
+        j = i + 1
+        if j < len(toks) and re.match(r"^\d+(\.\d+)?[smh]?$", toks[j]):
+            i = j + 1   # timeout 10 cmd 包装透明(排查常用)
+    toks = toks[i:]
+    if not toks:
+        return False
+    v = toks[0]
+    if "/" in v:
+        v = v.rsplit("/", 1)[-1]   # 绝对路径取基名判动词(exec 负载里 /usr/sbin/iptables 常见;基名仍须过白名单)
+    if v == "service":
+        return toks[1:2] == ["--status-all"] or (len(toks) >= 3 and toks[2] == "status")
+    if v == "crontab":
+        return len(toks) > 1 and all(t in ("-l", "--list") for t in toks[1:])
+    if v == "find":
+        return not any(t in _RO_FIND_DENY or t.startswith("-fprint") for t in toks[1:])
+    if v in ("sed", "yq"):
+        # 不认 -i/--in-place 与 w 写文件命令(sed 'w /path' 也是写)
+        return not any(t.startswith("-i") or t == "--in-place" or re.search(r"(^|[\s;])w\s*/", t)
+                       for t in toks[1:])
+    if v == "tar":   # 只认列表形态(-t/--list 且无 -c/-x/-r/-u 创建解包旗标)
+        body = toks[1:]
+        has_t = any(t == "--list" or (t.startswith("-") and not t.startswith("--") and "t" in t) for t in body)
+        has_w = any(t.startswith("-") and not t.startswith("--") and re.search(r"[cxru]", t[1:]) for t in body)
+        return has_t and not has_w
+    if v == "mount":
+        return len(toks) == 1   # 裸 mount 是列表;带参是挂载(写)
+    if v == "date":
+        return not any(t in ("-s", "--set") or t.startswith("--set=") for t in toks[1:])   # -s 设时间
+    if v == "hostname":
+        return len(toks) == 1 or all(t.startswith("-") for t in toks[1:])   # 裸/读旗标=查;带参=设置
+    if v == "arp":
+        return not any(t in ("-d", "-s") or (t.startswith("-") and re.search(r"[ds]", t)) for t in toks[1:])
+    if v == "fuser":
+        return not any("k" in t for t in toks[1:] if t.startswith("-"))   # -k/-km 杀进程
+    if v == "sysctl":
+        return not any(t in ("-w", "--write", "--system") or t.startswith("--load") for t in toks[1:])
+    if v == "ethtool":
+        return not any(t in ("-s", "-A", "-L", "-G", "-X", "-K", "-N", "-U", "-r", "--set",
+                             "--change", "--offload", "--pause", "--ring", "--channels",
+                             "--rxfh-indir", "--flow-type") for t in toks[1:])   # 其余 -i/-k/-S 等是查
+    if v == "conntrack":
+        return not any(t in ("-D", "-F", "-I", "-A", "-U", "--delete", "--flush", "--create",
+                             "--update") for t in toks[1:])   # -L/-C/-E 是查
+    if v == "tcpdump":
+        return not any(t == "-w" or t.startswith("--write") for t in toks[1:])   # -w 写抓包文件
+    if v in ("curl", "wget"):
+        # 查询形态(GET)放行;写方法/数据体/上传/落盘(-o/-O)转人审(改远端或写盘)
+        for t in toks[1:]:
+            tl = t.lower()
+            if (t in ("-X", "--request", "-d", "--data", "--data-ascii", "-T", "--upload-file",
+                      "-F", "--form", "--form-string", "-P", "--ftp-port",
+                      "-o", "--output", "-O", "--remote-name", "--remote-name-all",
+                      "--post-data", "--post-file", "--method", "--body-data", "--body-file")
+                    or tl.startswith("--data") or tl.startswith("--post") or tl.startswith("--form")
+                    or tl.startswith("--request=") or tl.startswith("--method=")
+                    or tl.startswith("--output") or tl.startswith("--upload") or tl.startswith("--body-")
+                    or re.match(r"^-x(post|put|delete|patch)$", tl) or re.match(r"^-o.", t)):
+                return False
+        return True
+    if v in ("nohup", "nice", "stdbuf", "setsid", "time", "watch", "ionice", "taskset"):
+        # 命令转发型包装器:跳过旗标(含各自取值旗标)后把剩余部分当命令递归判定(防 nohup/nice rm 漏放)
+        fv = {"nice": {"-n", "--adjustment"}, "watch": {"-n", "--interval", "-t"},
+              "ionice": {"-c", "-n", "-p"}, "taskset": {"-c", "-p", "--cpu-list"}}.get(v, set())
+        j = 1
+        while j < len(toks) and toks[j].startswith("-"):
+            if toks[j] in fv and j + 1 < len(toks):
+                j += 2
+            else:
+                j += 1
+        return _ro_segment(" ".join(toks[j:])) if j < len(toks) else False
+    if v == "xargs":
+        # 负载递归判定:xargs grep 放、xargs rm 拦;取值旗标成对跳,连写(-I{} / -n2)整体跳;无负载=echo 放
+        pair = {"-I", "-n", "-P", "-s", "-E", "-L", "-J", "--max-args", "--max-procs",
+                "--max-chars", "--max-lines", "--arg-file"}
+        j = 1
+        while j < len(toks) and toks[j].startswith("-"):
+            if toks[j] in pair and j + 1 < len(toks):
+                j += 2
+            else:
+                j += 1
+        return _ro_segment(" ".join(toks[j:])) if j < len(toks) else True
+    if v == "command":
+        j = 1
+        while j < len(toks) and toks[j].startswith("-"):
+            j += 1
+        return toks[j - 1] in ("-v", "-V") if j < len(toks) else False   # command -v x 是查;command CMD 递归
+    if v == "tc":
+        return not any(t in ("add", "del", "delete", "change", "replace") for t in toks[1:])
+    if v == "brctl":
+        return toks[1:2] == ["show"]
+    if v == "ipvsadm":
+        return not any(t.startswith("-") and re.search(r"[AEDCRZ]", t) for t in toks[1:])   # -Ln 等查形态放
+    if v in ("iptables", "ip6tables", "ebtables", "arptables"):
+        k = 1   # -t nat 选表只读(与取值成对跳过);其余旗标须是查看形态;裸链名(PREROUTING 等)是位置参数
+        while k < len(toks):
+            t = toks[k]
+            if t in ("-t", "--table") and k + 1 < len(toks):
+                k += 2
+                continue
+            if t.startswith("-"):
+                if not (_RO_READ_RE.match(t) or t.startswith("--list")
+                        or t in ("-V", "--version", "--line-numbers")):
+                    return False
+            k += 1
+        return True
+    if v in ("sh", "bash", "dash", "zsh", "ksh"):
+        # sh -c '脚本':脚本字符串整体再过同一套逐段判定(exec 进容器排查常借 sh -c 拼多条查询);
+        # 脚本里夹 rm/reboot/写重定向照样转人审。无 -c(交互/读脚本文件)不自动
+        body = toks[1:]
+        if "-c" in body and body.index("-c") + 1 < len(body):
+            script = body[body.index("-c") + 1]
+            return all(_ro_segment(s.strip()) for s in _split_ops(script))
+        return False
+    if v == "env":
+        # env 是命令转发(env rm -rf / 会执行 rm):跳过旗标与 VAR=x 后把剩余部分当命令递归判定,不构成绕道
+        j = 1
+        while j < len(toks) and (toks[j].startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[j])):
+            j += 1
+        return True if j >= len(toks) else _ro_segment(" ".join(toks[j:]))
+    if v == "kubectl":
+        return _ro_kubectl(toks)
+    if v == "git":
+        return _ro_git(toks)
+    if v in ("docker", "podman"):
+        i2 = _ro_skip_flags(toks[1:], _RO_FLAG_VAL[v])
+        if i2 >= len(toks) - 1:
+            return False
+        sub = toks[1:][i2]
+        if sub not in _RO_SUB[v]:
+            return False
+        if sub == "exec":
+            # 负载 = 跳过取值旗标后,首非旗标是容器名,其后是负载命令;负载只读才放行
+            tail = toks[1:][i2 + 1:]
+            j = _ro_skip_flags(tail, {"-e", "--env", "-u", "--user", "-w", "--workdir"})
+            return _ro_payload(tail[j + 1:] if j < len(tail) else [])
+        return True
+    if v in _RO_SUB:
+        i2 = _ro_skip_flags(toks[1:], _RO_FLAG_VAL.get(v, ()))
+        sub = toks[1:][i2] if i2 < len(toks) - 1 else ""
+        if sub not in _RO_SUB[v]:
+            return False
+        if v == "ip" and any(t in _RO_MUTATION for t in toks[1:]):
+            return False
+        return True
+    if v in _RO_PLAIN:
+        return True
+    if v in _RO_CODE or _RO_CODE_RE.match(v):
+        return False   # 解释器/DB客户端/远程执行/构建部署:内容即代码,静态判不了 → 人审
+    if v in _RO_WRITE or v == "mkfs" or v.startswith("mkfs."):
+        return False   # 明确写状态动词 → 人审
+    return True   # aiops 哲学(用户拍板):未知动词默认检查类,自动执行;只有黑名单才拦
+
+
+def classify_readonly(cmd):
+    """aiops 免回车判定:整条命令(含管道/链式的每一段)逐段判定,全部通过才 True。
+
+    哲学(用户拍板):默认自动执行——只有写动词黑名单(_RO_WRITE)、内容不可判定的代码类
+    (_RO_CODE)、危险结构与各工具的写形态才转人审;未知诊断工具默认视为检查类放行。
+    以下结构整体转人审:重定向写文件(> / >> / <)、heredoc、命令替换 $()/反引号、后台 &、
+    子 shell/进程替换括号、多行、超长、awk system();fd 复制(2>&1)与丢弃(>/dev/null、
+    2>/dev/null)视为无害放行。kubectl 按内置动词全集+变更黑名单判定(exec 负载递归判定)。
+    变量展开 $VAR 视为只读放行。
+    """
+    if not isinstance(cmd, str) or not cmd.strip() or len(cmd) > _RO_LEN_MAX:
+        return False
+    if "\n" in cmd or "\r" in cmd:
+        return False   # 多行/heredoc 是写命令的主形态,一律人审
+    if "$(" in cmd or "`" in cmd or "system(" in cmd:
+        return False   # 命令替换与 awk system() 无论引号状态都不自动
+    scrubbed = _RO_SAFE_REDIR.sub(" ", cmd)
+    if re.search(r"[<>]", scrubbed):
+        return False   # 重定向/进程替换整体人审;仅 fd 复制(2>&1)与丢弃(>/dev/null)视为无害
+    if re.search(r"(?<!&)&(?!&)", scrubbed):
+        return False   # 单个 & 是后台执行(&& 链放行,由逐段判定把关;2>&1 里的 & 已随无害重定向剔除)
+    if _unquoted_has(cmd, "()"):
+        return False   # 未加引号的括号 = 子 shell/算式外的语法,不猜
+    return all(_ro_segment(seg.strip()) for seg in _split_ops(cmd))
+
+
+def tool_ops_type(a, auto=False):
+    """auto=True(aiops 只读判定通过)时连同回车一起执行,免人审;否则只放输入行等用户回车。"""
     ses, sid, label, err = resolve_ops_terminal(a)
     if err:
         return {"ok": False, "error": err}
@@ -239,6 +678,11 @@ def tool_ops_type(a):
     # 写前快照:首读含命令回显;游标推进交给 ops_read
     with ses.lock:
         OPS_CURSORS[sid] = ses.written
+    if auto:
+        # aiops 只读命令:判定通过后直接连同回车执行(免人审),模型随即 ops_read 读回;
+        # 写入/变更命令不走这里(auto=False),仍只放输入行等用户回车
+        ses.write(cmd + "\r")
+        return {"ok": True, "sid": sid, "label": label, "command": cmd, "auto": True}
     ses.write(cmd)  # 只放入输入行,绝不追加 \r
     return {"ok": True, "sid": sid, "label": label, "command": cmd}
 
@@ -327,8 +771,9 @@ def tool_ops_read(a):
             "matched": matched, "wait": wait, "busy": bool(OPS_BUSY.get(sid))}
 
 
-def tool_ops_broadcast(a):
-    """同一条命令放进多台终端输入行(逐台回车);同机分组去重,解析失败的目标跳过并说明。"""
+def tool_ops_broadcast(a, auto=False):
+    """同一条命令放进多台终端输入行(逐台回车);同机分组去重,解析失败的目标跳过并说明。
+    auto=True(aiops 只读判定通过)时各台连同回车一起执行,免人审。"""
     raw = a.get("terminals")
     if isinstance(raw, str):
         raw = [x.strip() for x in raw.split(",") if x.strip()]
@@ -367,9 +812,11 @@ def tool_ops_broadcast(a):
     for ses, sid, label in picked:
         with ses.lock:
             OPS_CURSORS[sid] = ses.written   # 写前快照:首读含命令回显
-        ses.write(cmd)   # 只放入输入行,绝不追加 \r
+        ses.write(cmd + "\r" if auto else cmd)   # auto:aiops 只读命令直接执行;否则只放输入行
         placed.append({"sid": sid, "label": label})
     out = {"ok": True, "command": cmd, "targets": placed}
+    if auto:
+        out["auto"] = True
     if errs:
         out["skipped"] = errs   # 部分目标未放置:照常放其余,说明原因让模型自纠
     return out
@@ -611,8 +1058,9 @@ def ops_term_snapshot(ses, sid, label):
     return _ops_fence(label, "\n".join(lines))
 
 
-def build_ops_system_block():
-    """拼 ops 模式系统提示块:在线 SSH 终端清单(按主机地址:端口分组,含尾部快照)+ 执行纪律。不列本地 PTY。"""
+def build_ops_system_block(aiops=False):
+    """拼 ops/aiops 模式系统提示块:在线 SSH 终端清单(按主机地址:端口分组,含尾部快照)+ 执行纪律。
+    aiops=True 产出变体:只读排查命令免回车自动执行,写入/变更命令仍逐条人审。不列本地 PTY。"""
     groups, idx = [], {}
     for s in list(SSHS.sessions.values()):
         if s.exited is not None:
@@ -643,33 +1091,62 @@ def build_ops_system_block():
             extra = (" | " + uah) if uah and uah != label else ""
             rows.append("- %s | sid %s%s | alive\n%s"
                         % (label, s.id, extra, ops_term_snapshot(s, s.id, label)))
-    listing = "\n".join(rows) if rows else "当前无在线 SSH 终端,请提示用户用 /ssh 连接后再操作"
-    disciplines = [
-        "一步一步:每轮只在一台终端放置一条命令,等用户回车执行后读输出再决定下一步;多台集群任务按台链式推进,可来回切换读取",
-        "绝不自己回车:ops_type 只把命令放进输入行,执行权在用户回车",
-        '收到形如「[Ops] 已在 <label> 回车执行」的消息后,必须立即调用 ops_read(terminal=该终端, wait="quiet") 读取执行输出增量',
+    listing = "\n".join(rows) if rows else "当前无在线 SSH 终端;涉及服务器的操作请提示用户用 /ssh 连接后再试,本地 Mac 文件仍可用本地文件工具处理"
+    ops_trigger = ('收到形如「[Ops] 已在 <label> 回车执行」的消息后,必须立即调用 ops_read(terminal=该终端, wait="quiet") 读取执行输出增量')
+    mid = [
         "ops_read 超时(timed_out)说明命令长驻或暂无输出:tail -f / journalctl -f 等盯日志场景改用 wait=\"follow\" 带 expect 正则盯到命中;"
         "仍收不住就用正文问用户是否继续等待,答继续就再调 ops_read(游标已推进不会重复),不要空转重试",
         "长驻命令收尾纪律:busy=true(超时/盯守命中/截断)的终端绝不放置新命令——文本会写进长驻进程的输入流永不执行;"
         "先 ops_read(wait=\"quiet\") 非超时收尾解锁;确需中断(tail -f 等)用正文请用户在该终端按 Ctrl-C,"
         "收到 [Ops] 中断触发后 quiet 读确认提示符回来再继续",
-        "排障开局先摸底:对本轮涉及的每台主机各调一次 ops_facts 采集画像(只读、无需回车);清单里已带画像摘要的主机可直接用。"
-        "仍不清楚各终端身份/网络时,再逐台 ip a(用户只需回车);信息不足时用正文问用户,不要瞎猜",
-        "需要在多台主机上跑同一条命令对比结果(找不一致的那台)时,用 ops_broadcast 一次放进多台终端,用户逐台回车后逐台 ops_read 对比差异",
-        "读写文件内容用 cat(cat 文件读、cat > 文件 <<'EOF' 写,heredoc 算一条命令)",
+    ]
+    tail = [
         "不处理密码/sudo/OTP 交互:提示用户自己输入后继续",
         "可用 skill 工具加载排障手册类技能(系统提示已带技能名单),按手册步骤系统化推进",
         "清单按「主机地址:端口」分组,同组终端是同一台机器(同机多开):只在组内一台(第一个在线终端)放命令,不逐台重复放、不问用户;不同主机才逐台链式",
         "与任务无关的提问正常回答,不放命令;任务完成时总结收尾",
     ]
-    return ("## ops 模式协议(AI 直驱 SSH 终端)\n\n### 在线终端\n%s\n\n### 执行纪律\n%s\n"
-            % (listing, "\n".join("- " + d for d in disciplines)))
+    if aiops:
+        disciplines = [
+            "工作流(先排查、后结论、再修复):先用 ops_facts 与只读命令逐条排查(输出自动读回),排查完备后先用正文给出结论与依据,"
+            "然后把修复命令一条一条放置,等用户逐条回车确认后再继续;多条修复命令绝不一次全放",
+            "命令默认免回车:检查/排查/查看类(ps/journalctl/kubectl get/tcpdump/strace 及未知诊断工具)绝大多数命令自动执行,"
+            "你立即用 ops_read(terminal=该终端, wait=\"quiet\") 读输出,读完即可继续下一条,无需等用户",
+            "写入/变更必经人审:写/删文件、启停/重启服务、改配置、改网络、装卸软件、kubectl apply/delete 等改变状态的动作,"
+            "以及解释器与数据库客户端(python/mysql/redis-cli 等,内容静态判不了)等命令,系统会自动转为「放进输入行等用户回车」,这是设计而非故障;"
+            "绝不试图绕过——判定逐段进行(含 exec/sh -c/xargs/包装器内的负载命令),绕不过也不该绕",
+            'ops_type/ops_broadcast 返回 auto=true 表示只读命令已直接执行(立即 ops_read 读回);无 auto 表示命令停在输入行等用户回车,' + ops_trigger,
+            "需要在多台主机上跑同一条命令对比结果(找不一致的那台)时,用 ops_broadcast 一次投放多台(只读自动逐台执行,写入逐台人审)",
+            "远程服务器上的文件读取用 cat;用户要求处理本地 Mac 文件时改用本地工具 read_file/write_file/list_dir/grep/glob(写走审批卡确认,不经终端)",
+            "排障开局先摸底:对本轮涉及的每台主机各调一次 ops_facts 采集画像(只读、无需回车);清单里已带画像摘要的主机可直接用;"
+            "仍不清楚各终端身份/网络时,再逐台 ip a 等只读命令排查;信息不足时用正文问用户,不要瞎猜",
+        ] + mid + tail
+        title = "## aiops 模式协议(智能运维:只读自动执行,写入人审)"
+    else:
+        disciplines = [
+            "一步一步:每轮只在一台终端放置一条命令,等用户回车执行后读输出再决定下一步;多台集群任务按台链式推进,可来回切换读取",
+            "绝不自己回车:ops_type 只把命令放进输入行,执行权在用户回车",
+            ops_trigger,
+        ] + mid + [
+            "排障开局先摸底:对本轮涉及的每台主机各调一次 ops_facts 采集画像(只读、无需回车);清单里已带画像摘要的主机可直接用。"
+            "仍不清楚各终端身份/网络时,再逐台 ip a(用户只需回车);信息不足时用正文问用户,不要瞎猜",
+            "需要在多台主机上跑同一条命令对比结果(找不一致的那台)时,用 ops_broadcast 一次放进多台终端,用户逐台回车后逐台 ops_read 对比差异",
+            "远程服务器上的文件读写用 cat(cat 文件读、cat > 文件 <<'EOF' 写,heredoc 算一条命令);用户要求处理本地 Mac 文件时改用本地工具 read_file/write_file/list_dir/grep/glob(写走审批卡确认,不经终端)",
+        ] + tail
+        title = "## ops 模式协议(AI 直驱 SSH 终端)"
+    return ("%s\n\n### 在线终端\n%s\n\n### 执行纪律\n%s\n"
+            % (title, listing, "\n".join("- " + d for d in disciplines)))
 
 
 def ops_result_text(name, r):
     """ops 工具结果转模型文本(喂给 role=tool 消息),对齐 textutil.result_to_model_text 的分工。"""
     if name == "ops_type":
         if r.get("ok"):
+            if r.get("auto"):
+                return ('只读命令已在终端 %s(%s)直接执行(免回车):%s\n'
+                        '请立即调用 ops_read(terminal="%s", wait="quiet") 读取执行输出并继续;'
+                        "排查完备先给结论,修复/变更命令再用 ops_type 放置等用户回车"
+                        % (r.get("label"), r.get("sid"), r.get("command"), r.get("label")))
             return ('命令已放入终端 %s(%s)输入行,未回车:%s\n'
                     "等待用户回车;届时会收到 [Ops] 触发消息,收到后立即 ops_read(wait=\"quiet\") 读取输出"
                     % (r.get("label"), r.get("sid"), r.get("command")))
@@ -689,9 +1166,14 @@ def ops_result_text(name, r):
     if name == "ops_broadcast":
         if r.get("ok"):
             tg = "、".join(str(t.get("label") or t.get("sid")) for t in r.get("targets") or [])
-            out = ("命令已放入 %d 台终端(%s)输入行,未回车:%s\n"
-                   "等待用户逐台回车;每台回车后会收到 [Ops] 触发消息,逐台 ops_read 后对比各台输出差异"
-                   % (len(r.get("targets") or []), tg, r.get("command")))
+            if r.get("auto"):
+                out = ("只读命令已在 %d 台终端(%s)直接执行(免回车):%s\n"
+                       "请立即逐台调用 ops_read(terminal=各终端, wait=\"quiet\") 读取输出后对比差异"
+                       % (len(r.get("targets") or []), tg, r.get("command")))
+            else:
+                out = ("命令已放入 %d 台终端(%s)输入行,未回车:%s\n"
+                       "等待用户逐台回车;每台回车后会收到 [Ops] 触发消息,逐台 ops_read 后对比各台输出差异"
+                       % (len(r.get("targets") or []), tg, r.get("command")))
             if r.get("skipped"):
                 out += "\n未放置的目标:" + ";".join(r["skipped"])
             return out

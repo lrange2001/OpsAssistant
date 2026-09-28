@@ -31,10 +31,10 @@ function sideOnOpen() {
 let termSid = null, termTimer = null;
 // 终端状态:主屏(滚动模式,带回滚历史)+ 备用屏(全屏程序)双网格;tail = 原始字节尾部(密码提示检测用)
 // __rev = 渲染修订号:每次喂入/调格自增;termApplyText 据此跳过无变化的整屏渲染(幂等门)
-function termMakeState() { return { main: null, alt: false, screen: null, savedMain: null, tail: "", pend: "", __rev: 0 }; }
+function termMakeState() { return { main: null, alt: false, screen: null, savedMain: null, tail: "", pend: "", app: false, __rev: 0 }; }
 const termState = termMakeState();
 function stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "").replace(/\x1b[=>]/g, "");
+  return s.replace(/\x1b\[[0-9;?<>=]*[A-Za-z]/g, "").replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "").replace(/\x1b[=>]/g, "");
 }
 /* ---- 屏幕模型:滚动主屏与全屏程序备用屏共用一个 vt100 子集网格 ----
    覆盖 zsh 行编辑/补全菜单/Ctrl+R 反向搜索/不切备用屏的 macOS top 所需的全部行为:
@@ -48,8 +48,11 @@ function screenMake(cols, rows) {
 }
 function screenBlankRow(sc) { return new Array(sc.cols).fill(" "); }
 function screenCsi(sc, params, cmd) {
-  const priv = params.startsWith("?");
-  const ps = params.replace(/^\?/, "").split(";").map(x => parseInt(x) || 0);
+  // 私有前缀:? = DEC 私有模式(1049 备用屏等),> = XTMODKEYS/vim 的 modifyOtherKeys 开关,
+  // < = = 其他厂商序列 —— 一律剥掉前缀再取参数;此类序列落在忽略分支,但必须整段吞掉,
+  // 否则 \x1b[>4;2m 被劈开,">4;2m" 当可打印文本画进屏幕(vim 插入模式实测花屏来源)。
+  const priv = /^[?<>=]/.test(params);
+  const ps = params.replace(/^[?<>=]+/, "").split(";").map(x => parseInt(x) || 0);
   const n = (k, d) => (ps[k] > 0 ? ps[k] : d);
   sc.wrap = false;  // 任何光标操作取消待换行标记
   switch (cmd) {
@@ -125,7 +128,7 @@ function screenFeed(sc, data) {
     if (ch === "\x1b") {
       const nx = data[i + 1];
       if (nx === "[") {
-        const m = /^\x1b\[([0-9;?]*)([@-~])/.exec(data.slice(i, i + 32));
+        const m = /^\x1b\[([0-9;?<>=]*)([@-~])/.exec(data.slice(i, i + 32));
         if (m) { screenCsi(sc, m[1], m[2]); i += m[0].length; continue; }
         i += 2; continue;
       } else if (nx === "]") {  // OSC 标题等:吞到 BEL 或 ESC\ 结束
@@ -190,6 +193,11 @@ function screenResize(sc, cols, rows) {
   sc.wrap = false;
 }
 const _ALT_RE = /\x1b\[\?(1049|47|1047)([hl])/g;
+// DECCKM(光标键应用模式,?1h/?1l):vim/readline 启动时开,期待方向键为 SS3 形态(ESC O A)。
+// 不跟踪就永远发 CSI 形态(ESC [ A)——宽松 vim(带内建 xterm 键表)两种都认,严格按 terminfo
+// 解析的 vim 只认 kcuu1=\EOA,方向键全灭(Enter 是 \r 不经 terminfo,所以独活)。
+// ?12h/?1000h 等不得误判:正则要求 h/l 紧跟 "1"。
+const _APPCUR_RE = /\x1b\[\?1([hl])/g;
 // 流尾不完整转义序列检测:返回应扣留等待下块的起始下标(无则 raw.length)。
 // 轮询分块到达,\x1b[?1049h 这类序列可能劈在两块边界 —— 不扣留的话备用屏切换判定直接失效,
 // 全屏程序整帧画到主屏上(用户实测 top 乱码的根因之一)。窗口取尾部 40 字节(序列上限 32)。
@@ -201,7 +209,7 @@ function _holdIdx(raw) {
     if (seg.length < 2) return k;                                   // 孤 ESC
     const nx = seg[1];
     if (nx === "[") {
-      if (/^\x1b\[[0-9;?]*$/.test(seg)) return k;                   // CSI 参数段未闭合
+      if (/^\x1b\[[0-9;?<>=]*$/.test(seg)) return k;                // CSI 参数段未闭合
       return n;                                                     // 完整(或超长/未知)CSI:不扣
     }
     if (nx === "]") {                                               // OSC:无 BEL/ESC\ 终止符则扣(封顶防死等)
@@ -220,6 +228,13 @@ function termFeed(st, raw, cols, rows) {
   raw = st.pend + raw; st.pend = "";       // 拼上一块扣留的序列头,再做备用屏切分
   const hold = _holdIdx(raw);
   if (hold < raw.length) { st.pend = raw.slice(hold); raw = raw.slice(0, hold); }
+  // DECCKM 是终端全局模式(与主/备屏无关):扫整块,最后一次 ?1h/?1l 决定方向键编码。
+  // 键盘输入只会出现在已处理过的输出之后,读到的始终是当下生效的模式。
+  if (raw.indexOf("\x1b[?") >= 0) {
+    _APPCUR_RE.lastIndex = 0;
+    let am;
+    while ((am = _APPCUR_RE.exec(raw))) st.app = am[1] === "h";
+  }
   // 按备用屏开关切流:?1049h/?47h 切全屏程序屏(主屏冻结保留),退出后无缝续接
   let last = 0, m;
   _ALT_RE.lastIndex = 0;
@@ -398,7 +413,10 @@ function termApply() {
 function termSend(data) {
   if (!termSid) return;
   termLastKey = Date.now();
-  fetch("/api/term/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: termSid, data }) });
+  fetch("/api/term/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid: termSid, data }) })
+    .then(r => r.json())
+    .then(j => { if (j && !j.ok && j.error === "会话已退出") toast("本地终端已退出,输入未送达", "warn"); })   // 会话不存在(轮询侧自会收尾)不刷屏,只报真死
+    .catch(() => {});
   if (!termPollBusy) { if (termTimer) clearTimeout(termTimer); termTimer = setTimeout(termPoll, 40); }  // 40ms 后抓回显
 }
 function termFit() {
@@ -421,11 +439,16 @@ function termReset() {
   termEnsure();
 }
 const TERM_KEYS = { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b", ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D", Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~" };
+// DECCKM 开启时的光标键编码(SS3 形态,terminfo kcuu1/khome = \EOA/\EOH 等的就是它)。
+// Delete/PageUp/PageDown 维持 CSI ~ 形态——terminfo 的 kdch1/kpp/knp 本就是 CSI 3~/5~/6~。
+const TERM_APP_KEYS = { ArrowUp: "\x1bOA", ArrowDown: "\x1bOB", ArrowRight: "\x1bOC", ArrowLeft: "\x1bOD", Home: "\x1bOH", End: "\x1bOF" };
 const TERM_CTRL = { c: "\x03", d: "\x04", l: "\x0c", u: "\x15", a: "\x01", e: "\x05", w: "\x17", k: "\x0b", z: "\x1a", b: "\x02", f: "\x06", n: "\x0e", p: "\x10", r: "\x12", t: "\x14", g: "\x07", v: "\x16", y: "\x19" };
 // 键盘事件 → 发往 PTY 的字节。Delete/方向键按 Mac 习惯补齐组合:
 // Cmd/Alt+Backspace 删词删行、Cmd+←→ 行首行尾、Alt+←→ 按词移动、Alt+字符 ESC 前缀;
 // Cmd+C/V/X/A/Z 放行原生复制粘贴;输入法组合态(isComposing)不拦截。
-function termKeyData(e) {
+// st(可选)为终端状态:DECCKM(st.app)开启时光标键改发 SS3 形态 —— vim/readline 发
+// \x1b[?1h 后期待 ESC O A,严格按 terminfo 解析的 vim 不认 ESC [ A,方向键会全灭。
+function termKeyData(e, st) {
   if (e.isComposing || imeJustEnded()) return null;   // WebKit 拼音确认的回车不当终端回车
   const k = e.key;
   if (e.metaKey && e.ctrlKey) return null;
@@ -450,6 +473,7 @@ function termKeyData(e) {
     if (k.length === 1) return "\x1b" + k.toLowerCase();
     return null;
   }
+  if (st && st.app && TERM_APP_KEYS[k]) return TERM_APP_KEYS[k];
   if (TERM_KEYS[k]) return TERM_KEYS[k];
   if (k.length === 1) return k;
   return null;

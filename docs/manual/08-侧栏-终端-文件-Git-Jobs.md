@@ -7,7 +7,7 @@ Cmd+J 或 `/terminal` 开关侧栏,四个标签:
 - 点击黑色区域获得焦点后**直接打字**——这是真的 zsh(登录 shell),支持方向键、Ctrl+C/D/L/U/A/E/W、Tab 补全、粘贴;有闪烁光标,Mac 键位(Delete、Cmd+Backspace 删行、Alt+Backspace 删词、Cmd+Left/Right 行首尾)与 SSH 终端一致。
 - `run in background…` 输入框:把长命令丢到后台跑(不占终端),完成后状态浮层的 jobs 徽章可查输出。
 - Reset 按钮杀掉并重启 shell(卡死时用)。
-- top / htop / vim 这类全屏程序走备用屏按网格渲染(块光标),退出后回到滚动模式。
+- top / htop / vim 这类全屏程序走备用屏按网格渲染(块光标),退出后回到滚动模式。方向键跟随 DECCKM:vim/readline 开启光标键应用模式(`ESC[?1h`)后自动改发 SS3 形态(`ESC O A`),严格按 terminfo 解析的 vim 里的方向键因此可用(Enter 本就不受影响);退出后自动恢复。
 
 ![侧栏 PTY 终端](../screenshots/term.png)
 
