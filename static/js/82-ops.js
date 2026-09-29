@@ -62,7 +62,7 @@ function opsOnInterrupt(ses) {
   opsSendGuided(sessions.find(x => x.id === w.owner) || null,
     `[Ops] 已在 ${w.label} 按 Ctrl-C 中断。请立即调用 ops_read(terminal="${w.label}", wait="quiet") `
     + `确认提示符已回来(非超时收尾)后继续;若仍超时说明命令还在,可再次请用户按 Ctrl-C。`,
-    "ops: " + w.label + " 已按 Ctrl-C 中断,但等待会话压缩完成超时——可用 /vvv 手动读取输出后继续");
+    "ops: " + w.label + " 已按 Ctrl-C 中断,但等待会话压缩完成超时——可让助手调用 ops_read 手动读取输出后继续");
 }
 
 /* 给 owner 会话发引导消息的共通路径。owner 回合压缩中:sendText 会拒发(压缩完成整体替换消息,
@@ -81,7 +81,7 @@ async function opsSendGuided(owner, text, failToast) {
 async function opsTrigger(owner, label) {
   await opsSendGuided(owner,
     `[Ops] 已在 ${label} 回车执行。请立即调用 ops_read(terminal="${label}", wait="quiet") 读取该终端的执行输出增量并继续。`,
-    "ops: " + label + " 已回车执行,但等待会话压缩完成超时——可用 /vvv 手动读取输出后继续");
+    "ops: " + label + " 已回车执行,但等待会话压缩完成超时——可让助手调用 ops_read 手动读取输出后继续");
 }
 
 /* 撤回布防命令在远端输入行里的字符(^U 清行;vim 等全屏程序内不发,按键会打进程序) */

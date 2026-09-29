@@ -13,14 +13,15 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #      重启都读它;指向的目录被清掉(如 /tmp 随重启清空)就原址重建,数据绝不散落到别处;
 #   3) 旧指针 ~/Library/Application Support/ForFreedomAssistant/datadir.txt —— 读到即升级
 #      写进 ~/.assistant_config 并删除旧指针(一次性兼容);
-#   4) 缺省 /tmp/assisdata(FF_DEFAULT_DATA_DIR 可覆盖,测试沙盒用)。落定目录里没有
-#      config.json 时,把旧位置的服务数据项(~/ForFreedom 与应用支持目录,按 DATA_ITEMS
-#      白名单逐项搬,个人文件绝不动)自动整体迁来;落定后位置写进 ~/.assistant_config。
+#   4) 缺省 ~/ForFreedom/assisdata(FF_DEFAULT_DATA_DIR 可覆盖,测试沙盒用;缺省必须放
+#      持久位置,/tmp 随重启清空会丢数据,只可由用户显式选择)。落定目录里没有
+#      config.json 时,把旧位置的服务数据项(~/ForFreedom 根下散件与应用支持目录,按
+#      DATA_ITEMS 白名单逐项搬,个人文件绝不动)自动整体迁来;落定后位置写进 ~/.assistant_config。
 USER_CONFIG_PATH = os.path.expanduser("~/.assistant_config")
 LEGACY_STATE_DIR = os.path.expanduser("~/Library/Application Support/ForFreedomAssistant")
 LEGACY_POINTER_PATH = os.path.join(LEGACY_STATE_DIR, "datadir.txt")
-DEFAULT_DATA_DIR = os.environ.get("FF_DEFAULT_DATA_DIR") or "/tmp/assisdata"
-OLD_DEFAULT_DATA_DIR = os.path.expanduser("~/ForFreedom")   # 旧缺省=用户个人目录,只按白名单搬
+DEFAULT_DATA_DIR = os.environ.get("FF_DEFAULT_DATA_DIR") or os.path.expanduser("~/ForFreedom/assisdata")
+OLD_DEFAULT_DATA_DIR = os.path.expanduser("~/ForFreedom")   # 旧缺省=用户个人目录根,只按白名单搬散件(现缺省 assisdata 在其内,realpath 已防自迁)
 LEGACY_DATA_DIRS = (OLD_DEFAULT_DATA_DIR, LEGACY_STATE_DIR)
 # 数据项清单 = 本文件实际引用的 DATA_DIR 下的文件/目录;换位置/迁移按此逐项搬,
 # 位置记录(~/.assistant_config)与旧指针文件不算数据项

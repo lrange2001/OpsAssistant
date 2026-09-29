@@ -216,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                 text, w = s.read_marked()
                 self._json({"ok": True, "data": text, "exited": s.exited, "written": w})
         elif path in ("/api/term/buffer", "/api/ssh/buffer"):
-            # /vvv 与抓取终端增量的唯一数据源:服务端 ring buffer 按字节 offset 取窗口
+            # 抓取终端增量的唯一数据源:服务端 ring buffer 按字节 offset 取窗口
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             mgr = TERMS if path == "/api/term/buffer" else SSHS
             s = mgr.get((qs.get("sid") or [""])[0])

@@ -1,13 +1,13 @@
 "use strict";
 /* ================= SSH 服务器终端(左右分栏面板:终端左、会话右,多会话多标签;渲染族复用 termFeed/termApplyText/TERM_KEYS) ================= */
-// 每个已连接终端一个会话对象,全部状态跟会话走;键盘输入与 /vvv /download /upload 都作用于「当前标签」
+// 每个已连接终端一个会话对象,全部状态跟会话走;键盘输入与 /download /upload 都作用于「当前标签」
 // 终端与聊天会话 1:1 配对:对象带 chat(配对聊天会话 id);标签条全局渲染所有终端,active = 配对当前会话;
 // 点标签 = 终端和聊天区一起切到它配对的会话;关终端只解绑(会话保留可再绑)
 let sshSessions = [];        // [{sid,label,hostId,key,chat,alive,pw,pwUsed,state:{buf,alt,screen},timer,pollBusy,lastKey}]
 // ops 视图覆盖:ops 会话驱动全部在线终端,「看哪台终端」与「哪个会话」解耦——点标签只切视图、布防自动跟随;
 // 切会话/切模式即丢弃。非 ops 恒 null,sshActive() 与 sshCur() 完全等价(1:1 配对语义不变)
 let sshViewSid = null;
-function sshCur() { return sshSessions.find(s => s.chat === curId) || null; }   // 当前会话配对的终端(1:1,至多一个;仅配对语义:/vvv、门控、连接配对都用它)
+function sshCur() { return sshSessions.find(s => s.chat === curId) || null; }   // 当前会话配对的终端(1:1,至多一个;仅配对语义:门控、连接配对都用它)
 function sshActive() {   // 面板实际显示与接收键盘的终端:ops 有视图覆盖则显示覆盖终端,否则= 配对终端
   if (sshViewSid) {
     const v = sshSessions.find(s => s.sid === sshViewSid);
@@ -92,7 +92,7 @@ function renderSshTabs() {
     t.title = ses.label + (ses.alive ? "" : " (off)") + "\n" + ses.sid + "\n" +
       (isTermMode(curMode())
         ? "Click to view this terminal (the ops conversation keeps driving all terminals)"
-        : "Click to switch to this terminal's conversation\n/vvv /download /upload act on the current tab");
+        : "Click to switch to this terminal's conversation\n/download /upload act on the current tab");
     wrap.appendChild(t);
   });
   const plus = document.createElement("div");
@@ -374,7 +374,7 @@ function sshFit() {
 }
 async function sshReattach() {
   // 页面刷新后重挂:活着的终端按聊天会话配对恢复成标签(配对查各会话 sshTabs 元数据;无主终端:第一个归当前
-  // 会话(尚未配对时),其余各自动新建会话配对 —— 维持 1:1;服务端 hist 不丢,/vvv 偏移照旧)。
+  // 会话(尚未配对时),其余各自动新建会话配对 —— 维持 1:1;服务端 hist 不丢,引用偏移照旧)。
   // 注意 j.sessions 是 /api/ssh/status 的终端列表,与聊天会话数组 sessions 不同名物
   try {
     const j = await (await fetch("/api/ssh/status")).json();
@@ -407,21 +407,11 @@ async function sshReattach() {
   } catch {}
 }
 
-/* ---- /vvv 与 F4 的共同数据源:服务端 ring buffer 按 offset 取增量 ---- */
+/* ---- 抓终端增量(⇧⌘T 引用)的数据源:服务端 ring buffer 按 offset 取增量 ---- */
 async function fetchTermBuffer(kind, sid, offset, maxBytes) {
   const ep = kind === "ssh" ? "/api/ssh/buffer" : "/api/term/buffer";
   const q = "?sid=" + encodeURIComponent(sid) + "&offset=" + offset + (maxBytes ? "&max_bytes=" + maxBytes : "");
   return await (await fetch(ep + q)).json();
-}
-function longestBacktick(s) { let m = 0; for (const run of s.match(/`+/g) || []) m = Math.max(m, run.length); return m; }
-// 终端日志消息体:头部标记(全量/增量)+ 围栏代码块(围栏长度压过日志内最长反引号串)+ 需求文字
-function buildTerminalLog(label, text, full, truncated) {
-  const n = text ? text.split("\n").length : 0;
-  const head = full
-    ? `[Terminal ${label} full ${n} lines${truncated ? ", head trimmed" : ""}]`
-    : `[Terminal ${label} +${n} lines since last]`;
-  const fence = "`".repeat(Math.min(24, Math.max(3, longestBacktick(text) + 1)));
-  return head + "\n" + fence + "\n" + text + "\n" + fence;
 }
 // 终端偏移表:挂在聊天会话对象上(persist 随之持久化;切会话互不串);键为终端 sid(t*/s*)
 function termOffsets(s) { if (!s.sshOffsets) s.sshOffsets = {}; return s.sshOffsets; }

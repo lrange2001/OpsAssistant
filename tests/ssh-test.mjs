@@ -1,5 +1,5 @@
 // SSH 集成测试:server 端 ring buffer / hosts CRUD(含密码保存)/ download 兜底走真实 :8091;
-// SSH 会话交互(多标签终端/键盘/vvv/传输/重挂/会话隔离)在页面里 mock /api/ssh/* 验证协议与 UI。
+// SSH 会话交互(多标签终端/键盘/终端引用/传输/重挂/会话隔离)在页面里 mock /api/ssh/* 验证协议与 UI。
 // 用法:node /tmp/ff-ui-test/ssh-test.mjs [http://127.0.0.1:8091]
 import { chromium } from "playwright-core";
 import { writeFileSync, statSync, unlinkSync } from "fs";
@@ -41,7 +41,7 @@ async function serverSideTests() {
   await sleep(1200);
   j = await (await fetch(BASE + `/api/term/buffer?sid=${sid}&offset=${n1}`)).json();
   ok("srv: 增量只含新内容", j.ok && j.text.includes("BUFFER-TWO") && !j.text.includes("BUFFER-ONE"));
-  // 1b) 二次引用重复回归(/vvv/F4):增量须从上回 next_offset 精确续读,不得回退对齐行首
+  // 1b) 二次引用重复回归(⇧⌘T 终端引用):增量须从上回 next_offset 精确续读,不得回退对齐行首
   await fetch(BASE + "/api/term/write", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sid, data: "ZQXMARK" }),  // 不回车:行尾悬一个部分行(模拟提示符后的未完行)
@@ -57,7 +57,7 @@ async function serverSideTests() {
   });
   await sleep(1200);
   jv = await (await fetch(BASE + `/api/term/buffer?sid=${sid}&offset=${n1v}`)).json();
-  ok("srv: 增量不重发上一窗口行尾(修复 /vvv 二次引用重复)", jv.ok && jv.text.includes("AFTER-MARK-2") && !jv.text.includes(mark));
+  ok("srv: 增量不重发上一窗口行尾(修复终端引用二次重复)", jv.ok && jv.text.includes("AFTER-MARK-2") && !jv.text.includes(mark));
   j = await (await fetch(BASE + `/api/term/buffer?sid=${sid}&offset=999999999`)).json();
   ok("srv: offset 越界容错拉回", j.ok && j.text === "" && j.next_offset < 999999999);
   j = await (await fetch(BASE + `/api/term/buffer?sid=not-exist&offset=0`)).json();
@@ -493,7 +493,7 @@ async function run(browser) {
   await page.click("#ssh-chip");
   ok("ui: 再点徽章重新展开", await page.evaluate(() => document.querySelector("#ssh-panel").classList.contains("open")));
 
-  /* T6 /vvv 首次全量 */
+  /* T6 ⇧⌘T 首次引用 = 全量(含服务器输出与回显的命令行) */
   await page.evaluate(() => window.__ssh.push(
     "● nginx.service - A high performance web server\r\n" +
     "   Loaded: loaded (/lib/systemd/system/nginx.service; enabled)\r\n" +
@@ -502,51 +502,43 @@ async function run(browser) {
     "Sep 22 06:00:11 web1 nginx[992]: nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)\r\n" +
     "```raw-fence-in-log```\r\nops@web1:~$ "));
   await sleep(500);
-  await input.fill("/vvv why did nginx fail to start?");
-  await input.press("Enter");
-  await sleep(800);
-  let bodies = await page.evaluate(() => window.__chatBodies);
-  let last = bodies[bodies.length - 1];
-  let users = (last.messages || []).filter(m => m.role === "user");
-  const user1 = users[users.length - 1];
-  ok("vvv: 首次全量标记", user1 && /^\[Terminal ops@10\.0\.0\.8 full \d+ lines\]/.test(user1.content), user1 && user1.content.slice(0, 60));
-  ok("vvv: 含服务器输出与用户键入", user1.content.includes("bind() to 0.0.0.0:80 failed") && user1.content.includes("systemctl status nginx"));
-  ok("vvv: 围栏压过日志内反引号串", /`{4}/.test(user1.content) && !/`{5}/.test(user1.content) && user1.content.includes("```raw-fence-in-log```"));
-  ok("vvv: 需求文字在末尾", /why did nginx fail to start\?$/.test(user1.content.trim()));
+  await input.focus();
+  await page.keyboard.press("Meta+Shift+t");
+  await sleep(500);
+  st = await page.evaluate(() => activeQuotes);
+  ok("quote: 首次引用为全量(含服务器输出与用户命令)", st.length === 1 && st[0].type === "terminal" &&
+    st[0].text.includes("bind() to 0.0.0.0:80 failed") && st[0].text.includes("systemctl status nginx"),
+    st[0] && st[0].text.slice(0, 60));
   const off = await page.evaluate(() => {
     const ss = JSON.parse(localStorage.getItem("juno-chat-sessions-v1") || "[]");
     return Object.values((ss[0] || {}).sshOffsets || {})[0];
   });
-  ok("vvv: 偏移落进会话持久化", typeof off === "number" && off > 0, String(off));
+  ok("quote: 偏移落进会话持久化", typeof off === "number" && off > 0, String(off));
+  await page.click("#quote-bar .queued-chip button");
 
-  /* T7 /vvv 增量(含新键入)且不带旧日志 */
+  /* T7 再抓 = 增量(含新键入)且不带旧日志 */
   await page.click("#ssh-screen");
   await page.keyboard.type("tail -n 5 /var/log/nginx/error.log");
   await page.keyboard.press("Enter");
   await page.evaluate(() => window.__ssh.push("2026/09/22 06:00:11 [emerg] 992#992: bind() failed\r\nops@web1:~$ "));
   await sleep(600);
-  await input.fill("/vvv and what does the error log say?");
-  await input.press("Enter");
-  await sleep(800);
-  bodies = await page.evaluate(() => window.__chatBodies);
-  last = bodies[bodies.length - 1];
-  users = (last.messages || []).filter(m => m.role === "user");
-  const user2 = users[users.length - 1];
-  ok("vvv: 增量标记", user2 && /^\[Terminal ops@10\.0\.0\.8 \+\d+ lines since last\]/.test(user2.content), user2 && user2.content.slice(0, 60));
-  ok("vvv: 增量含用户新键入命令", user2.content.includes("tail -n 5 /var/log/nginx/error.log"));
-  ok("vvv: 增量含新输出", user2.content.includes("[emerg] 992#992: bind() failed"));
-  ok("vvv: 增量不含旧全量内容", !user2.content.includes("high performance web server"));
-  ok("vvv: 上下文延续(不重发也不断档)", users.length >= 2 && users[0].content.includes("[Terminal ops@10.0.0.8 full"));
+  await input.focus();
+  await page.keyboard.press("Meta+Shift+t");
+  await sleep(500);
+  st = await page.evaluate(() => activeQuotes);
+  ok("quote: 二次抓为增量且含新键入命令", st.length === 1 && st[0].text.includes("tail -n 5 /var/log/nginx/error.log"),
+    JSON.stringify((st[0] && st[0].text || "").slice(0, 60)));
+  ok("quote: 增量含新输出不含旧全量内容", st[0] && st[0].text.includes("[emerg] 992#992: bind() failed") && !st[0].text.includes("high performance web server"));
+  await page.click("#quote-bar .queued-chip button");
 
-  /* T8 不用 /vvv = 普通对话不带日志 */
+  /* T8 普通消息不带终端日志 */
   await input.fill("just a plain question without logs");
   await input.press("Enter");
   await sleep(800);
-  bodies = await page.evaluate(() => window.__chatBodies);
-  last = bodies[bodies.length - 1];
+  let bodies = await page.evaluate(() => window.__chatBodies);
+  let last = bodies[bodies.length - 1];
   const plain = (last.messages || []).filter(m => m.role === "user").pop();
-  ok("vvv: 普通消息不带终端日志", plain && plain.content === "just a plain question without logs", plain && plain.content);
-  ok("vvv: 普通消息延续原上下文", (last.messages || []).some(m => (m.content || "").includes("[Terminal ops@10.0.0.8 full")));
+  ok("plain: 普通消息不带终端日志", plain && plain.content === "just a plain question without logs", plain && plain.content);
 
   /* T9 Cmd/Ctrl+Shift+T:终端聚焦时抓增量进输入框(引用 chip) */
   await page.click("#ssh-screen");
@@ -733,10 +725,10 @@ async function run(browser) {
   await input.fill("/sshinfo");
   await input.press("Enter");
   await sleep(500);
-  ok("cmd: /sshinfo 显示当前 sid/master/vvv", await page.evaluate(() => {
+  ok("cmd: /sshinfo 显示当前 sid/master 且无 vvv 字样", await page.evaluate(() => {
     const b = [...document.querySelectorAll(".msg.local .bubble")].pop();
     return b && /SSH terminals \(1\)/.test(b.textContent) && /\[current\]/.test(b.textContent) &&
-      /s\d+-mock/.test(b.textContent) && /ControlMaster: running/.test(b.textContent) && /\/vvv sent: \d+/.test(b.textContent);
+      /s\d+-mock/.test(b.textContent) && /ControlMaster: running/.test(b.textContent) && !/vvv/.test(b.textContent);
   }));
 
   /* T16 断连显示退出码;重连 = 关标签再 /ssh(工具条已整排移除,无 Reconnect 按钮) */
@@ -852,23 +844,23 @@ async function run(browser) {
   ok("ui: office 模式徽章可见(回归修复)", st.chipComputed !== "none", st.chipComputed);
   await page.evaluate(() => setUimode("coding"));
 
-  /* T21 /help 与 / 面板:有终端时收录 vvv/download/upload */
+  /* T21 /help 与 / 面板:有终端时收录 download/upload,vvv 已移除 */
   await input.fill("/help");
   await input.press("Enter");
   await sleep(400);
-  ok("cmd: /help(有终端)含 vvv/ssh/download", await page.evaluate(() => {
+  ok("cmd: /help(有终端)含 ssh/download 且无 vvv", await page.evaluate(() => {
     const b = [...document.querySelectorAll(".msg.local .bubble")].pop();
-    return b && /\/vvv/.test(b.textContent) && /\/sshhosts/.test(b.textContent) && /\/download/.test(b.textContent) && /never captured/.test(b.textContent);
+    return b && /\/sshhosts/.test(b.textContent) && /\/download/.test(b.textContent) && /never captured/.test(b.textContent) && !/\/vvv/.test(b.textContent);
   }));
-  await input.fill("/vv");
+  await input.fill("/down");
   await sleep(300);
-  ok("cmd: / 面板(有终端)列出 /vvv", await page.evaluate(() => {
+  ok("cmd: / 面板(有终端)列出 /download 且无 /vvv", await page.evaluate(() => {
     const names = [...document.querySelectorAll(".composer-dd .it .nm")].map(e => e.textContent);
-    return names.some(n => n.startsWith("/vvv"));
+    return names.some(n => n.startsWith("/download")) && !names.some(n => n.startsWith("/vvv"));
   }));
   await input.fill("");
 
-  /* T22 多终端(1:1 配对):第二连接自动建会话2 配对新标签并切过去,输入与 /vvv 都作用于当前标签 */
+  /* T22 多终端(1:1 配对):第二连接自动建会话2 配对新标签并切过去,输入与引用都作用于当前标签 */
   const sess1 = await page.evaluate(() => curId);   // 初始会话(T2-T21 的终端都配在它名下)
   const nSess22 = await page.evaluate(() => sessions.length);
   await page.click("#ssh-screen");
@@ -911,15 +903,13 @@ async function run(browser) {
     o.hist += "OPS-SESSION-OUT\r\nops@web1:~$ "; o.out += "OPS-SESSION-OUT\r\nops@web1:~$ ";
   });
   await sleep(500);
-  await input.fill("/vvv summarize this terminal");
-  await input.press("Enter");
-  await sleep(800);
-  bodies = await page.evaluate(() => window.__chatBodies);
-  last = bodies[bodies.length - 1];
-  users = (last.messages || []).filter(m => m.role === "user");
-  const multiVvv = users[users.length - 1];
-  ok("multi: /vvv 带当前标签的日志", multiVvv && /^\[Terminal root@10\.0\.0\.8 full/.test(multiVvv.content) && multiVvv.content.includes("WEB-MARKER-99") && multiVvv.content.includes("echo FROM-WEB"), multiVvv && multiVvv.content.slice(0, 60));
-  ok("multi: /vvv 不串其他标签的内容", multiVvv && !multiVvv.content.includes("OPS-SESSION-OUT"));
+  await input.focus();
+  await page.keyboard.press("Meta+Shift+t");
+  await sleep(500);
+  st = await page.evaluate(() => activeQuotes);
+  ok("multi: 引用带当前标签的日志", st.length === 1 && st[0].text.includes("WEB-MARKER-99") && st[0].text.includes("echo FROM-WEB"), st[0] && st[0].text.slice(0, 60));
+  ok("multi: 引用不串其他标签的内容", st[0] && !st[0].text.includes("OPS-SESSION-OUT"));
+  await page.click("#quote-bar .queued-chip button");
 
   /* T22b 「+」按钮:当前主机一键再开一个终端 */
   await page.click("#ssh-tabs .ssh-tab-add");
@@ -1022,20 +1012,20 @@ async function run(browser) {
   st = await page.evaluate(() => {
     const b = [...document.querySelectorAll(".msg.local .bubble")].pop();
     const text = b ? b.textContent : "";
-    return { text, listed: /^- `\/(vvv|download|upload)/m.test(text), hint: /once a terminal is open/.test(text) };
+    return { text, listed: /^- `\/(download|upload)/m.test(text), hint: /once a terminal is open/.test(text) };
   });
-  ok("gate: /help(无终端)不再列 vvv/download/upload 且带指引", !st.listed && st.hint && /\/ssh/.test(st.text), st.text.slice(0, 120));
+  ok("gate: /help(无终端)不再列 download/upload 且带指引", !st.listed && st.hint && /\/ssh/.test(st.text), st.text.slice(0, 120));
   ok("gate: /sshhosts 仍在列表", /\/sshhosts/.test(st.text));
   await input.fill("/");
   await sleep(300);
-  ok("gate: / 面板(无终端)不出 vvv/download/upload", await page.evaluate(() => {
+  ok("gate: / 面板(无终端)不出 download/upload", await page.evaluate(() => {
     const names = [...document.querySelectorAll(".composer-dd .it .nm")].map(e => e.textContent);
-    return names.length > 0 && !names.some(n => n.startsWith("/download")) && !names.some(n => n.startsWith("/vvv")) && !names.some(n => n.startsWith("/upload"));
+    return names.length > 0 && !names.some(n => n.startsWith("/download")) && !names.some(n => n.startsWith("/upload"));
   }));
-  await input.fill("/vvv what happened");
+  await input.fill("/upload a b");
   await input.press("Enter");
   await sleep(400);
-  ok("gate: 无终端 /vvv 给连接指引", await page.evaluate(() => {
+  ok("gate: 无终端 /upload 给连接指引", await page.evaluate(() => {
     const b = [...document.querySelectorAll(".msg.local .bubble")].pop();
     return b && /No SSH terminal open/.test(b.textContent);
   }));
@@ -1284,17 +1274,18 @@ async function run(browser) {
   ok("iso: 后台轮询未清(输出进他会话终端不漏到当前屏)", (st.bg[1].tail || "").includes("BG-POLL-99") && !st.screen.includes("BG-POLL-99"),
     JSON.stringify(st.bg[1].tail).slice(0, 120));
 
-  /* /vvv 门控按会话:会话A 引用自己的终端不串他会话;无配对会话给指引 */
-  await input.fill("/vvv iso question");
+  /* 引用按会话:会话A 引用自己的终端不串他会话 */
+  await input.focus();
+  await page.keyboard.press("Meta+Shift+t");
+  await sleep(500);
+  st = await page.evaluate(() => activeQuotes);
+  ok("iso: 会话A 引用自己的终端", st.length === 1 && st[0].text.includes("ISO-OPS-1"), st[0] && st[0].text.slice(0, 60));
+  ok("iso: 引用不串他会话终端内容", st[0] && !st[0].text.includes("BG-POLL-99"));
+  await page.click("#quote-bar .queued-chip button");
+  await input.fill("iso note before switching");
   await input.press("Enter");
-  await sleep(800);
-  bodies = await page.evaluate(() => window.__chatBodies);
-  last = bodies[bodies.length - 1];
-  users = (last.messages || []).filter(m => m.role === "user");
-  const isoVvv = users[users.length - 1];
-  ok("iso: 会话A 下 /vvv 引用自己的终端", isoVvv && /^\[Terminal ops@10\.0\.0\.8 full/.test(isoVvv.content) && isoVvv.content.includes("ISO-OPS-1"), isoVvv && isoVvv.content.slice(0, 60));
-  ok("iso: /vvv 不串他会话终端内容", isoVvv && !isoVvv.content.includes("BG-POLL-99"));
-  const isoD = await page.evaluate(() => { newSession(); return curId; });   // 普通新建(会话A 已有消息,防抖不拦)
+  await sleep(700);
+  const isoD = await page.evaluate(() => { newSession(); return curId; });   // 普通新建(先发一条消息过 ⌘N 防抖)
   await sleep(300);
   st = await page.evaluate(() => ({
     actIdx: [...document.querySelectorAll("#ssh-tabs .ssh-tab")].findIndex(t => t.classList.contains("active")),
@@ -1303,10 +1294,10 @@ async function run(browser) {
     domTabs: document.querySelectorAll("#ssh-tabs .ssh-tab").length,
   }));
   ok("iso: 无配对会话无 active 标签且徽章藏(标签条仍全局渲染)", st.actIdx === -1 && st.chip === "none" && st.curTerm === 0 && st.domTabs === 2, JSON.stringify(st));
-  await input.fill("/vvv what happened here");
+  await input.fill("/upload a b");
   await input.press("Enter");
   await sleep(500);
-  ok("iso: 无配对会话 /vvv 给连接指引", await page.evaluate(() => {
+  ok("iso: 无配对会话终端命令给连接指引", await page.evaluate(() => {
     const b = [...document.querySelectorAll(".msg.local .bubble")].pop();
     return b && /No SSH terminal open/.test(b.textContent);
   }));

@@ -1,6 +1,6 @@
 // ForFreedom Assistant —— Mac 应用壳(完全自包含)
 // server.py 与 index.html 内嵌在 bundle 的 Resources/app/ 下,运行期不依赖任何外部源码;
-// 用户数据默认在 /tmp/assisdata(设置页可改位置;位置记录 ~/.assistant_config,重新编译/重启都沿用,
+// 用户数据默认在 ~/ForFreedom/assisdata(持久位置;设置页可改,位置记录 ~/.assistant_config,重新编译/重启都沿用,
 // 目录被清则原址重建;旧位置数据由 server.py 首次启动自动整体迁移,app 不注入 FF_DATA_DIR、不参与迁移)。
 // 模型完全跟随 ccswitch(cc-switch):供应商/密钥/模型名实时读取 ~/.claude/settings.json。
 import Cocoa

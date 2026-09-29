@@ -20,7 +20,6 @@ const SLASH = [
   { name: "terminal", desc: "Toggle the Terminal side pane" },
   { name: "model", desc: "Show current model (from ccswitch)" },
   { name: "ssh", args: "[name]", desc: "Connect to a saved server (SSH terminal beside the chat; multiple tabs allowed)" },
-  { name: "vvv", args: "<question>", sshOnly: true, desc: "Ask with the current SSH terminal's log attached (full first, then increments)" },
   { name: "sshhosts", desc: "List saved SSH hosts" },
   { name: "sshinfo", desc: "Current SSH terminals and connection details" },
   { name: "download", args: "<remote> [dest] [force]", sshOnly: true, desc: "scp a file from the current SSH terminal's server" },
@@ -106,8 +105,8 @@ async function handleSlashCommand(raw) {
             `- \`/${c.name}\`${c.argument_hint ? ` \`${c.argument_hint}\`` : ""} — ${c.description || "(no description)"}`).join("\n")
             + "\n\nCustom commands expand their prompt on send. Manage in Settings > Commands." : "")
           + (sshChatTabs().length
-            ? "\n\n**SSH** — `/ssh <name>` opens the server terminal beside the chat; connect several hosts and switch via tabs. `/vvv <question>` attaches the **current** terminal's log: full on first use, increments after, including what you typed in the terminal. Cmd/Ctrl+Shift+T quotes new terminal output into the composer. Passwords typed at hidden prompts are never captured; a password saved on the host profile is auto-typed once at the prompt. Still, avoid inlining secrets in commands. `/download` and `/upload` move files over the current terminal's authenticated link."
-            : "\n\n**SSH** — `/ssh <name>` opens the server terminal beside the chat (several terminals, one tab each). Terminal commands (`/vvv` `/download` `/upload`) appear here and in the `/` palette once a terminal is open; `/sshhosts` lists saved hosts."));
+            ? "\n\n**SSH** — `/ssh <name>` opens the server terminal beside the chat; connect several hosts and switch via tabs. Cmd/Ctrl+Shift+T quotes the **current** terminal's new output into the composer as a chip — attach it, type your question, send. Passwords typed at hidden prompts are never captured; a password saved on the host profile is auto-typed once at the prompt. Still, avoid inlining secrets in commands. `/download` and `/upload` move files over the current terminal's authenticated link."
+            : "\n\n**SSH** — `/ssh <name>` opens the server terminal beside the chat (several terminals, one tab each). Terminal commands (`/download` `/upload`) appear here and in the `/` palette once a terminal is open; `/sshhosts` lists saved hosts."));
       }
       break;
     }
@@ -226,26 +225,6 @@ async function handleSlashCommand(raw) {
       } catch (e) { localMsg("/ssh failed: " + e.message); }
       break;
     }
-    case "vvv": {
-      // 终端日志辅助排错:始终取「当前标签」的 SSH 终端;首次全量、之后增量;不发 /vvv 的消息就是普通对话,不带日志
-      const s = curSession();
-      const cur = sshCur();
-      if (!cur) { localMsg("No SSH terminal open — connect with `/ssh <name>` first. `/vvv` attaches the **current** terminal tab's log (switch tabs to pick another terminal). The log lives on the server side, so it survives page refreshes."); break; }
-      if (!s) break;
-      if (!rest) { localMsg("Usage: `/vvv <what you want to know about the terminal output>`\n\nAttaches the current terminal's log — full on first use, increments after, including what you typed there. Passwords typed at hidden prompts are never captured."); break; }
-      try {
-        const off0 = termOffsets(s)[cur.sid] || 0;
-        const j = await fetchTermBuffer("ssh", cur.sid, off0, off0 ? 65536 : 262144);
-        if (!j.ok) { localMsg("Terminal buffer unavailable: " + (j.error || "")); break; }
-        const text = (j.text || "").replace(/\s+$/, "");
-        if (!text) { localMsg("No new terminal output since the last `/vvv` — nothing to attach. Retype your question without `/vvv` if you still want to ask."); break; }
-        const out = buildTerminalLog(cur.label, text, off0 === 0, j.truncated);
-        termOffsets(s)[cur.sid] = j.next_offset;
-        persist();
-        await sendText(out + "\n\n" + rest, true);
-      } catch (e) { localMsg("/vvv failed: " + e.message); }
-      break;
-    }
     case "sshhosts": {
       try {
         const j = await (await fetch("/api/ssh/hosts")).json();
@@ -259,7 +238,6 @@ async function handleSlashCommand(raw) {
       break;
     }
     case "sshinfo": {
-      const s = curSession();
       const tabs = sshChatTabs();   // 终端列表只列当前聊天会话的;ControlMaster 列表保持全局
       if (!tabs.length) { localMsg("No SSH terminals open. Connect with `/ssh <name>` — you can open several and switch via tabs."); break; }
       try {
@@ -268,10 +246,9 @@ async function handleSlashCommand(raw) {
         tabs.forEach(ses => {
           const me = (j.sessions || []).find(x => x.sid === ses.sid);
           const master = (j.masters || []).find(m => m.key === ses.key);
-          const sent = s && s.sshOffsets ? (s.sshOffsets[ses.sid] || 0) : 0;
-          lines.push(`- ${sshCur() && sshCur().sid === ses.sid ? "**[current]** " : ""}\`${ses.label}\` — sid \`${ses.sid}\`${me && !me.alive ? " · exited" : ""}${me ? ` · output ${me.bytes.toLocaleString()} B · input ${me.input_bytes.toLocaleString()} B` : ""}\n  ControlMaster: ${master ? (master.alive ? "running" : "not running") : "unknown"} \`${master ? master.path : "-"}\` · /vvv sent: ${sent.toLocaleString()} B`);
+          lines.push(`- ${sshCur() && sshCur().sid === ses.sid ? "**[current]** " : ""}\`${ses.label}\` — sid \`${ses.sid}\`${me && !me.alive ? " · exited" : ""}${me ? ` · output ${me.bytes.toLocaleString()} B · input ${me.input_bytes.toLocaleString()} B` : ""}\n  ControlMaster: ${master ? (master.alive ? "running" : "not running") : "unknown"} \`${master ? master.path : "-"}\``);
         });
-        localMsg(`**SSH terminals (${tabs.length})** — /vvv, /download and /upload act on the current tab\n\n` + lines.join("\n"));
+        localMsg(`**SSH terminals (${tabs.length})** — /download and /upload act on the current tab\n\n` + lines.join("\n"));
       } catch { localMsg("Status unavailable."); }
       break;
     }

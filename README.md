@@ -4,7 +4,7 @@
 
 **Mac 专用的内网运维 AI 助手** —— 把「SSH 登服务器敲命令」和「问 AI」合进一个窗口
 
-**Mac-native AI ops copilot** — a real SSH terminal beside the chat; `/vvv` feeds live terminal context to the model. MCP plugins · cc-switch model routing · 100% local data
+**Mac-native AI ops copilot** — a real SSH terminal beside the chat; one shortcut quotes live terminal output to the model, and **ops / aiops modes let the model drive your terminals** (aiops: read-only probes auto-run, every write waits for your Enter). MCP plugins · cc-switch model routing · 100% local data
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Apple%20Silicon-black.svg)
@@ -20,7 +20,7 @@
 
 ## 它是什么
 
-ForFreedom Assistant 是跑在 Mac 上的**工具代理型 AI 助手**,面向内网运维:左侧真实 SSH 终端、右侧 AI 对话,`/vvv` 把终端里敲过的命令和服务器输出增量带给模型——「刚才这条报错,帮我看看」直接有上下文。
+ForFreedom Assistant 是跑在 Mac 上的**工具代理型 AI 助手**,面向内网运维:左侧真实 SSH 终端、右侧 AI 对话,Cmd/Ctrl+Shift+T 一键把终端新增输出抓成引用带给模型——「刚才这条报错,帮我看看」直接有上下文。更进一步,**ops / aiops 两种模式让模型直接驱动终端干活**:排查命令自动跑、修复命令逐条等你回车(详见下文[两种运维模式](#两种运维模式ops-与-aiops))。
 
 后端是仅用标准库的 Python 包(根 server.py 为薄壳入口),前端原生 JS(Vue 已 vendored),无 Node、无构建;服务只监听 `127.0.0.1`,模型接入完全委托 ccswitch——云端供应商与本地 llama-server 一切即换,敏感数据可以完全不出内网。
 
@@ -32,13 +32,36 @@ ForFreedom Assistant 是跑在 Mac 上的**工具代理型 AI 助手**,面向内
 | --- | --- |
 | **SSH 多终端** | 主机档案 + 分组管理、密钥管理(生成/指纹/公钥)、密码可选记忆、多终端标签,每个终端与一个聊天会话 1:1 配对 |
 | **左终端右对话** | 真实 PTY 终端,支持 vim/top 等全屏程序;竖直分隔条拖宽;Cmd+1~4 聚焦/轮换/开合 |
-| **`/vvv` 终端上下文** | 当前终端的命令与输出增量带给模型;`/download`、`/upload` 走 SSH 复用通道免二次认证,路径参数免 Tab 自动补全(远端经复用通道、唯一目录自动下钻) |
+| **终端上下文引用** | Cmd/Ctrl+Shift+T 把当前终端新增输出抓成引用 chip 带给模型;`/download`、`/upload` 走 SSH 复用通道免二次认证,路径参数免 Tab 自动补全(远端经复用通道、唯一目录自动下钻) |
 | **定时巡检** | 无人值守任务(每天 9 点检查磁盘/容器状态并总结之类),应用开着自动跑(当前为本机任务);运行记录一键「转 ops 处理」,带着结果进 ops 会话定位问题 |
 | **ops 模式** | `/mode ops` 进入:模型把命令逐台打进在线 SSH 终端输入行、绝不代按回车,你回车执行、输出自动读回分析,逐台链式直到完成;同机多开的终端自动分组,同组只放一台;排障增强:ops_facts 主机画像(只读探测、跨会话缓存)、ops_broadcast 多机群发对比找不同、盯日志 follow 读取(正则命中即收)、排障技能(runbook)准入该模式 |
+| **aiops 模式** | `/mode aiops` 进入:ops 的排查加速变体——只读排查命令免回车自动执行(逐段判定 + 写黑名单兜底,包装器/`sh -c`/`docker exec` 内层负载递归判定),写入/变更仍逐条人审;先排查、后结论、再修复 |
 | **本地开发全套** | 命令执行实时输出、文件读写 diff、Git 面板(分支/提交/推送确认)、改文件前自动检查点可回滚 |
 | **工程化对话** | 多会话并行生成、排队/引导两种运行中输入、深度思考折叠、上下文压缩(可视化进度,可取消)、长文本折叠、`@` 文件引用、`$` 技能、子代理、MCP 插件、Cmd+K 命令中心、全量快捷键改绑 |
 
 完整说明见[使用手册](./使用手册.md)。
+
+## 两种运维模式:ops 与 aiops
+
+左终端右对话是基础盘;真正的杀手锏是两种「AI 直驱终端」模式——模型不再只是"看"终端,而是亲手在上面干活,执行权分层交回你手上。
+
+### ops 模式:AI 放命令,回车即人审
+
+`/mode ops` 进入(需至少一个在线 SSH 终端)。循环:模型把一条命令直接打进指定终端的**输入行**——**绝不代按回车**;你看过命令、亲自按回车,它才真正执行;输出自动读回给模型,模型分析后放下一条,逐台链式直到完成。每一步的执行权都在你手上,回车就是人审。多终端在线时逐台推进,同机多开自动分组防重复;配套 `ops_facts` 主机画像、`ops_broadcast` 多机群发对比、盯日志 follow 读取与排障技能(runbook)准入。
+
+### aiops 模式:排查免回车,写入人审
+
+`/mode aiops` 进入,ops 的排查加速变体——**纯排查命令连同回车自动执行,任何写入/变更仍逐条等你回车**。适合「让模型自己把问题查清楚,人只把关修复动作」:排查几十条只读命令连续推进不等你,真正危险的写入一步都不会少审。
+
+| | ops | aiops |
+| --- | --- | --- |
+| 排查/检查命令 | 放输入行,等你回车 | **自动执行**,连续推进直到给结论 |
+| 写入/变更命令 | 放输入行,等你回车 | 相同:一条一条放,你看一条、回车一条 |
+| 节奏 | 一步一回车 | 先排查(免回车)→ 结论 → 再修复(逐条人审) |
+
+免回车按「默认放行、写入转人审」判定:管道与 `&&`/`;` 链逐段判定;未知诊断工具(`tcpdump`/`strace`/`nmap`/`ethtool`…)直接放行;写动词黑名单(`rm`/`chmod`/`kill`/`reboot`/`apt`/`kubectl apply`…)、内容静态判不了的(`python3 -c`/`sh -c`/`mysql -e`…)与写重定向/heredoc 一律转人审;`nohup rm`、`xargs rm`、`docker exec` 内层负载递归过同一套判定。
+
+两种模式都会话级粘性、刷新自动恢复等待状态;完整规则见[使用手册 · 09 远程服务器](./docs/manual/09-远程服务器-SSH.md)。
 
 ## 快速开始
 
@@ -50,7 +73,7 @@ zsh start.sh 8090          # 等价于 python3 server.py --port 8090
 open http://127.0.0.1:8090
 ```
 
-> 注意:不设 `FF_DATA_DIR` 时数据目录缺省 `/tmp/assisdata`(位置记录在 `~/.assistant_config`,设置页可改并整体迁移);想隔离试用请 `FF_DATA_DIR=/tmp/ff-demo zsh start.sh 8090`。
+> 注意:不设 `FF_DATA_DIR` 时数据目录缺省 `~/ForFreedom/assisdata`(持久不随重启丢失;位置记录在 `~/.assistant_config`,设置页可改并整体迁移,但请勿选 `/tmp` 等易失位置);想隔离试用请 `FF_DATA_DIR=/tmp/ff-demo zsh start.sh 8090`。
 
 ### 方式二:编译成 Mac 应用(.app)
 
@@ -221,7 +244,7 @@ zsh mac-app/test.sh                           # 七步冒烟(第 7 步走真实�
 
 | 套件 | 覆盖 | 基线 |
 | --- | --- | --- |
-| ssh-test | SSH 服务端 + 页面全交互(含终端选区与 Cmd+C) | 139 |
+| ssh-test | SSH 服务端 + 页面全交互(含终端引用、选区与 Cmd+C) | 168 |
 | deep-test | 深度 UI 全功能 | 98 |
 | longtext-test | 长文本折叠、行区间、查找展开 | 42 |
 | parallel-test | 多会话并行生成 | 30 |

@@ -16,7 +16,7 @@ from collections import deque
 # ---- split body (verify: 勿动本行以上) ----
 # ---------------------------- PTY 终端(ZCode terminal: create/write/resize/dispose + data/exit) ----------------------------
 # PTY 原始字节 → 纯文本:剥 ANSI(与前端 stripAnsi 同规则)+ \r/\b 光标折叠(与 termRender 同规则)。
-# /vvv 与"抓终端增量"的服务端 buffer 端点用它做整体窗口的一次性转换(规避跨块 decode 裂字)。
+# "抓终端增量"的服务端 buffer 端点用它做整体窗口的一次性转换(规避跨块 decode 裂字)。
 _RE_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _RE_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _RE_MISC = re.compile(r"\x1b[=>]")
@@ -52,7 +52,7 @@ class TermSession:
     def __init__(self, sid, cwd, cols, rows, argv=None, env_extra=None):
         self.id = sid
         self.out = deque(maxlen=200000)  # 输出缓冲(客户端轮询取走)
-        # 服务端 scrollback(ring):/vvv 增量与抓取终端的权威数据源,页面刷新不丢
+        # 服务端 scrollback(ring):抓取终端增量的权威数据源,页面刷新不丢
         self.hist = bytearray()
         self.hcap = 1 << 20   # 每会话 1 MiB,超出淘汰头部
         self.written = 0      # 累计追加字节序号(单调递增)
@@ -184,7 +184,7 @@ class TermSession:
                 headtrim = True
             lo = start - self.base
             # 只有头部裁剪落进行中才回退对齐行首;普通增量从上回 next_offset 续读(天然 UTF-8 边界),
-            # 回退会把上一窗口的行尾(提示符/命令行)原样重发 —— 正是 /vvv 与 F4 二次引用重复的根因
+            # 回退会把上一窗口的行尾(提示符/命令行)原样重发 —— 正是 F4 二次引用重复的根因
             if headtrim:
                 roll = self.hist.rfind(b"\n", max(0, lo - 512), lo)
                 if roll >= 0:
