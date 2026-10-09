@@ -173,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
                 "context_window": resolve_context_window(cc),
             }})
         elif path == "/api/open-skills":
-            os.makedirs(datadir.SKILLS_DIR, exist_ok=True)
+            os.makedirs(datadir.SKILLS_DIR, mode=0o700, exist_ok=True)
             subprocess.Popen(["open", datadir.SKILLS_DIR])
             self._json({"ok": True, "dir": datadir.SKILLS_DIR})
         elif path == "/api/datadir":
@@ -182,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
                         "config_path": USER_CONFIG_PATH,
                         "restart_hint": "应用并迁移后,重启应用才会完全切换到新位置"})
         elif path == "/api/open-datadir":
-            os.makedirs(datadir.DATA_DIR, exist_ok=True)
+            os.makedirs(datadir.DATA_DIR, mode=0o700, exist_ok=True)
             subprocess.Popen(["open", datadir.DATA_DIR])
             self._json({"ok": True, "dir": datadir.DATA_DIR})
         elif path == "/api/usage/summary":
@@ -645,7 +645,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not name or "/" in name or name.startswith("."):
                     self._json({"ok": False, "error": "代理名不合法"})
                     return
-                os.makedirs(datadir.AGENTS_DIR, exist_ok=True)
+                os.makedirs(datadir.AGENTS_DIR, mode=0o700, exist_ok=True)
                 if body.get("delete"):
                     try:
                         os.remove(os.path.join(datadir.AGENTS_DIR, body["delete"] + ".md"))
@@ -655,7 +655,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 md = "---\nname: %s\ndescription: %s\n---\n\n%s\n" % (
                     name, (body.get("description") or "").replace("\n", " "), body.get("prompt") or "")
-                with open(os.path.join(datadir.AGENTS_DIR, name + ".md"), "w", encoding="utf-8") as f:
+                fd = os.open(os.path.join(datadir.AGENTS_DIR, name + ".md"),
+                             os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 子代理提示词,创建即 0600
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(md)
                 self._json({"ok": True})
             except Exception as e:
@@ -670,7 +672,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not dn or "/" in dn or dn.startswith("."):
                         self._json({"ok": False, "error": "记忆名不合法"})
                         return
-                    os.makedirs(datadir.MEMORY_DIR, exist_ok=True)
+                    os.makedirs(datadir.MEMORY_DIR, mode=0o700, exist_ok=True)
                     try:
                         os.remove(os.path.join(datadir.MEMORY_DIR, dn + ".md"))
                     except OSError:
@@ -681,8 +683,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not name or "/" in name or name.startswith("."):
                     self._json({"ok": False, "error": "记忆名不合法"})
                     return
-                os.makedirs(datadir.MEMORY_DIR, exist_ok=True)
-                with open(os.path.join(datadir.MEMORY_DIR, name + ".md"), "w", encoding="utf-8") as f:
+                os.makedirs(datadir.MEMORY_DIR, mode=0o700, exist_ok=True)
+                fd = os.open(os.path.join(datadir.MEMORY_DIR, name + ".md"),
+                             os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 记忆常含内网事实,创建即 0600
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(body.get("content") or "")
                 self._json({"ok": True})
             except Exception as e:

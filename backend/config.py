@@ -20,7 +20,8 @@ DEFAULT_CONFIG = {
     # 自定义斜杠命令(ZCode commands)停用名单(按命令名)
     "commands_disabled": [],
     # SSH 主机档案(连接管理;不存任何密码/OTP,认证在 PTY 终端里完成)
-    "ssh_hosts": [],   # [{"id","label","host","port","user","key_path","jump","persist_min","notes","group"}]
+    "ssh_hosts": [],   # [{"id","label","host","port","user","key_path","jump","persist_min","notes","group",
+                        #   "tag","color"}] tag/color 可选:环境标签文案(如 生产/staging)与预设色键(如 red/purple),空 = 无标签
     # SSH 主机分组名列表(只决定设置页的分组显示顺序,允许空组;主机记录 group="" 表示未分组)
     "ssh_groups": [],
 }
@@ -45,12 +46,21 @@ def load_config():
 
 def save_config(cfg):
     with _config_lock:
-        with open(datadir.CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        # 原子写:tmp 以 0600 直开(不做先建后 chmod,免得密码明文短暂全局可读),fsync 后 replace
+        tmp = datadir.CONFIG_PATH + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.chmod(datadir.CONFIG_PATH, 0o600)  # config 里可能存 SSH 主机密码(明文),收紧到仅属主可读写
-        except OSError:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, datadir.CONFIG_PATH)  # config 里可能存 SSH 主机密码(明文),落盘文件恒为 0600
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 CONFIG = load_config()

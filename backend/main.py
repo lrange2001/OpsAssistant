@@ -41,10 +41,13 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((args.host, args.port))
     sock.listen(128)
-    os.makedirs(datadir.SKILLS_DIR, exist_ok=True)
-    os.makedirs(datadir.AGENTS_DIR, exist_ok=True)
-    os.makedirs(datadir.MEMORY_DIR, exist_ok=True)
-    os.makedirs(datadir.COMMANDS_DIR, exist_ok=True)
+    # 数据目录及其子项创建时即 0700(makedirs 的 mode 只作用于叶子,父目录需先单独建;
+    # 已存在的不追改)。敏感数据不出本机,目录也不对其他本机用户/进程开放
+    os.makedirs(datadir.DATA_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(datadir.SKILLS_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(datadir.AGENTS_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(datadir.MEMORY_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(datadir.COMMANDS_DIR, mode=0o700, exist_ok=True)
     _cm_dir()
 
     # 退出清理:回收全部 PTY(SSH 与本地终端);ControlMaster 交给 ControlPersist 自然过期,

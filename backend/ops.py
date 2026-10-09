@@ -27,15 +27,17 @@ from .tools_builtin import TOOL_DEFS, TOOL_IMPL
 
 # sid -> 已消费到的字节序号(buffer_slice 的 next_offset);ops_read 是唯一写者
 OPS_CURSORS = {}
-# sid -> True:上次 ops_read 判定该终端仍未收尾(长驻命令占着前台);quiet 收尾/终端退出即解除。
-# ops_type/ops_broadcast 据此拒绝写入——新命令会落进运行中进程的 stdin 永不执行
+# sid -> True:上次 ops_read 判定该终端仍未收尾(长驻命令占着前台);quiet 收尾/follow 中断或超时
+# 自动 Ctrl-C 收尾/终端退出即解除。ops_type/ops_broadcast 据此拒绝写入——新命令会落进运行中进程的 stdin 永不执行
 OPS_BUSY = {}
 _OPS_SNAP_BYTES = 500     # 系统块尾部快照取最后 500 字节
 _OPS_SNAP_LINES = 15      # 快照只保留最后 15 行
 _OPS_QUIET_S = 1.2        # quiet 模式:输出静默超过该秒数即收
 _OPS_POLL_S = 0.2         # quiet/follow 轮询间隔(不持锁睡眠,每次 buffer_slice 短临界区)
 _OPS_READ_CAP = 65536     # 单次 ops_read 累计文本上限,超出提前收(truncated)
-_OPS_FOLLOW_MAX_S = 60    # follow 模式超时上限(等日志命中比 quiet 宽,默认 30)
+_OPS_FOLLOW_DEF_S = 120   # follow 缺省盯守时长(秒),发起方可用 timeout_s 覆盖
+_OPS_FOLLOW_MAX_S = 600   # follow 模式超时上限(盯日志比 quiet 宽,默认 120)
+_OPS_FOLLOW_SETTLE_S = 3  # follow 中断/超时后的收尾上限:等输出静默带回 ^C 回显与提示符,到点即收不挂死
 _FACTS_TTL_S = 12 * 3600  # 主机画像缓存有效期,过期自动重探
 _FACTS_EXEC_S = 25        # 画像探测命令超时
 # httpapi 装配 ops 模式工具表的白名单(模式本体;技能工具另由 httpapi 按开关放行)
@@ -72,9 +74,12 @@ OPS_TOOL_DEFS = [
                 '默认 wait="quiet":轮询等输出静默约 1.2 秒后返回;wait="now" 立即读一次当前增量;'
                 'wait="follow":盯输出直到新增文本命中 expect 正则(如 "ERROR|Traceback")或超时,'
                 "适合 tail -f / journalctl -f 等长驻命令。timeout_s 在 quiet 限 1-20(默认 8)、"
-                "follow 限 1-60(默认 30),到点返回 timed_out=true。终端断开后仍可读尾部(alive=false)。"
+                "follow 限 1-600(默认 120)。follow 到点未命中自动向该终端发 Ctrl-C 停掉长驻命令,"
+                "返回 timed_out=true 且 stopped=true(收尾输出含 ^C 回显与提示符,终端按已收尾处理);"
+                "盯守期间用户在该终端按 Ctrl-C 或点面板「终止盯日志」则立即以 interrupted=true 收尾。"
+                "终端断开后仍可读尾部(alive=false)。"
                 "返回 busy=true 表示该终端仍未收尾(长驻命令占着前台):不得向它放置新命令,"
-                "先 wait=\"quiet\" 非超时收尾解锁,长驻命令请用户在该终端按 Ctrl-C 中断。"
+                "先 wait=\"quiet\" 非超时收尾解锁,或用 follow 到点自动 Ctrl-C 收尾。"
             ),
             "parameters": {
                 "type": "object",
@@ -83,7 +88,7 @@ OPS_TOOL_DEFS = [
                     "wait": {"type": "string", "enum": ["quiet", "now", "follow"],
                              "description": "quiet=等静默收(默认),now=立即读一次,follow=盯到命中 expect 或超时"},
                     "expect": {"type": "string", "description": 'follow 模式必填:正则,新增输出命中即收(matched=true)'},
-                    "timeout_s": {"type": "number", "description": "超时秒数:quiet 1-20 默认 8;follow 1-60 默认 30"},
+                    "timeout_s": {"type": "number", "description": "超时秒数:quiet 1-20 默认 8;follow 1-600 默认 120,到点未命中自动 Ctrl-C 收尾"},
                 },
                 "required": ["terminal"],
             },
@@ -673,7 +678,8 @@ def tool_ops_type(a, auto=False):
             "终端 %s(%s)上一条命令未收尾(上次 ops_read 到点未收或盯守命中,疑似 tail -f 类长驻仍在跑),"
             '现在放新命令会写进运行中进程的输入流而不执行。请先:(1) 调 ops_read(terminal="%s", wait="quiet"),'
             "非超时收尾即解锁(命令只是慢、已结束的情形,无需打扰用户);(2) 确认是长驻命令(tail -f / "
-            "journalctl -f 等)则用正文请用户在该终端按 Ctrl-C 中断,收到 [Ops] 中断触发后先 "
+            'journalctl -f 等)则发 ops_read(wait="follow", expect=不可命中正则, timeout_s=短)借到点自动 '
+            "Ctrl-C 收尾,或用正文请用户在该终端按 Ctrl-C / 点面板「终止盯日志」,收到 [Ops] 中断触发后先 "
             'ops_read(wait="quiet") 确认提示符回来,再放置新命令' % (label, sid, label))}
     # 写前快照:首读含命令回显;游标推进交给 ops_read
     with ses.lock:
@@ -701,7 +707,7 @@ def tool_ops_read(a):
             pat = re.compile(expect)
         except re.error as e:
             return {"ok": False, "error": "expect 不是合法正则: %s" % e}
-        default_t, max_t = 30, _OPS_FOLLOW_MAX_S
+        default_t, max_t = _OPS_FOLLOW_DEF_S, _OPS_FOLLOW_MAX_S
     else:
         default_t, max_t = 8, 20
     try:
@@ -713,6 +719,7 @@ def tool_ops_read(a):
         with ses.lock:
             cur = ses.written  # 无游标(未见 ops_type):从当下 written 起读
     parts, acc, truncated, timed_out, matched = [], 0, False, False, False
+    stopped, interrupted = False, False   # follow 专属:到点未命中已发 \x03 停命令 / 盯守期间收到用户 Ctrl-C
 
     def _hit():
         return pat.search("".join(parts)) is not None if pat is not None else False
@@ -726,6 +733,8 @@ def tool_ops_read(a):
     else:
         now = time.time()
         deadline, last_change = now + timeout, now
+        int0 = getattr(ses, "interrupts", 0)   # Ctrl-C 计数快照:盯守期间该终端收到 \x03 即用户终止
+        settle_until = 0.0                     # 中断收尾截止(stopped/interrupted 后等静默,上限兜底)
         while True:
             r = ses.buffer_slice(cur, _OPS_READ_CAP)  # 锁在 buffer_slice 内,临界区极短
             if r["text"]:
@@ -737,7 +746,7 @@ def tool_ops_read(a):
             if acc >= _OPS_READ_CAP:
                 truncated = True
                 break
-            if pat is not None and _hit():
+            if pat is not None and not interrupted and not stopped and _hit():
                 matched = True
                 break
             if ses.exited is not None:
@@ -749,18 +758,37 @@ def tool_ops_read(a):
                     if pat is not None and _hit():
                         matched = True
                 break
+            if (wait == "follow" and not interrupted and not stopped
+                    and getattr(ses, "interrupts", 0) != int0):
+                # 用户终止:盯守期间该终端被写入 Ctrl-C(键盘直按或面板「终止盯日志」),
+                # 转入中断收尾——等静默把 ^C 回显与提示符一并读回即收
+                interrupted = True
+                settle_until = time.time() + _OPS_FOLLOW_SETTLE_S
             now = time.time()
-            if pat is None and now - last_change >= _OPS_QUIET_S:
-                break   # quiet:静默即收;follow:静默不算完,继续盯到命中或超时
-            if now >= deadline:
-                timed_out = True
-                break
+            if interrupted or stopped:
+                # 中断收尾:输出静默即收;命令不听 SIGINT 仍在滴流时由 settle_until 兜底,绝不挂死
+                if now - last_change >= _OPS_QUIET_S or now >= settle_until:
+                    break
+            else:
+                if pat is None and now - last_change >= _OPS_QUIET_S:
+                    break   # quiet:静默即收;follow:静默不算完,继续盯到命中或超时
+                if now >= deadline:
+                    timed_out = True
+                    if pat is not None and ses.exited is None:
+                        # follow 到点未命中:向该终端 PTY 发 Ctrl-C 停掉长驻命令(复用 write 写入通道,
+                        # 终端已断/退出时 write 内部静默丢弃),转入中断收尾;quiet 超时不发——命令可能只是慢
+                        ses.write("\x03")
+                        stopped = True
+                        settle_until = now + _OPS_FOLLOW_SETTLE_S
+                        continue
+                    break
             time.sleep(_OPS_POLL_S)
     OPS_CURSORS[sid] = cur  # 成功才写回游标,失败/异常不推进
-    # 忙闲转移(前端只认返回的 busy 字段,不自行推导):终端退出→解除;到点未收/盯守命中/截断→视为仍被
-    # 长驻命令占用(timed_out 只说明"到点未收尾",不必然还在跑——保守拒绝由后续 quiet 收尾自愈,至多多读一次);
-    # quiet 静默收尾→解除;now 是窥读,不改判定
-    if ses.exited is not None:
+    # 忙闲转移(前端只认返回的 busy 字段,不自行推导):终端退出或 follow 已发 Ctrl-C(stopped/interrupted)
+    # →长驻命令已被停掉,视为收尾解除;quiet 到点未收/盯守命中/截断→视为仍被长驻命令占用(timed_out 只说明
+    # "到点未收尾",不必然还在跑——保守拒绝由后续 quiet 收尾自愈,至多多读一次);quiet 静默收尾→解除;
+    # now 是窥读,不改判定
+    if ses.exited is not None or stopped or interrupted:
         OPS_BUSY.pop(sid, None)
     elif timed_out or matched or truncated:
         OPS_BUSY[sid] = True
@@ -768,7 +796,8 @@ def tool_ops_read(a):
         OPS_BUSY.pop(sid, None)
     return {"ok": True, "sid": sid, "label": label, "text": "".join(parts),
             "timed_out": timed_out, "alive": ses.exited is None, "truncated": truncated,
-            "matched": matched, "wait": wait, "busy": bool(OPS_BUSY.get(sid))}
+            "matched": matched, "wait": wait, "busy": bool(OPS_BUSY.get(sid)),
+            "stopped": stopped, "interrupted": interrupted}
 
 
 def tool_ops_broadcast(a, auto=False):
@@ -798,7 +827,8 @@ def tool_ops_broadcast(a, auto=False):
             continue
         if OPS_BUSY.get(sid):
             errs.append("终端 %s(%s)上一条命令未收尾(长驻占用)已跳过:先 ops_read(wait=\"quiet\") "
-                        "非超时收尾解锁;长驻命令请用户在该终端按 Ctrl-C 中断" % (label, sid))
+                        "非超时收尾解锁;长驻命令可发 ops_read(wait=\"follow\", expect=不可命中正则, "
+                        "timeout_s=短)到点自动 Ctrl-C 收尾,或请用户在该终端按 Ctrl-C / 点面板「终止盯日志」" % (label, sid))
             continue
         g = _term_group(ses)
         if g in seen_grp:
@@ -923,9 +953,10 @@ def _facts_load(spec):
 
 def _facts_save(spec, lines):
     try:
-        os.makedirs(datadir.FACTS_DIR, exist_ok=True)
+        os.makedirs(datadir.FACTS_DIR, mode=0o700, exist_ok=True)  # 主机画像属内网探测结果,目录收紧到仅属主
         tmp = _facts_cache_path(spec) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 0600 直开,免先建后 chmod 的竞态窗口
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"ts": time.time(), "lines": lines}, f, ensure_ascii=False)
         os.replace(tmp, _facts_cache_path(spec))
     except OSError:
@@ -1039,7 +1070,8 @@ def _ops_fence(label, text, timed_out=False, alive=True):
            fence, text, fence]
     if timed_out:
         out.append("等待超时,输出可能未完:该终端未收尾,不要直接放置新命令(会写进长驻进程的输入流不执行);"
-                   "要收掉它请用正文让用户在该终端按 Ctrl-C,要继续盯则 ops_read(wait=\"follow\", expect=...)")
+                   '要收掉它可 ops_read(wait="follow", expect=不可命中正则, timeout_s=短)——到点未命中会自动发 '
+                   "Ctrl-C 收尾;或用正文请用户在该终端按 Ctrl-C / 点面板「终止盯日志」")
     if not alive:
         out.append("终端已断开")
     return "\n".join(out)
@@ -1095,9 +1127,11 @@ def build_ops_system_block(aiops=False):
     ops_trigger = ('收到形如「[Ops] 已在 <label> 回车执行」的消息后,必须立即调用 ops_read(terminal=该终端, wait="quiet") 读取执行输出增量')
     mid = [
         "ops_read 超时(timed_out)说明命令长驻或暂无输出:tail -f / journalctl -f 等盯日志场景改用 wait=\"follow\" 带 expect 正则盯到命中;"
-        "仍收不住就用正文问用户是否继续等待,答继续就再调 ops_read(游标已推进不会重复),不要空转重试",
-        "长驻命令收尾纪律:busy=true(超时/盯守命中/截断)的终端绝不放置新命令——文本会写进长驻进程的输入流永不执行;"
-        "先 ops_read(wait=\"quiet\") 非超时收尾解锁;确需中断(tail -f 等)用正文请用户在该终端按 Ctrl-C,"
+        "follow 到点未命中会自动向终端发 Ctrl-C 停掉长驻命令并以收尾返回(stopped=true),不必请用户手动中断;"
+        "要盯更久就增大 timeout_s(上限 600),仍拿不准就用正文问用户,不要空转重试",
+        "长驻命令收尾纪律:busy=true(quiet 超时/盯守命中/截断)的终端绝不放置新命令——文本会写进长驻进程的输入流永不执行;"
+        "先 ops_read(wait=\"quiet\") 非超时收尾解锁;确需中断(tail -f 等)可发 ops_read(wait=\"follow\", expect=不可命中正则, "
+        "timeout_s=短)借到点自动 Ctrl-C 收尾,或用正文请用户在该终端按 Ctrl-C / 点面板「终止盯日志」,"
         "收到 [Ops] 中断触发后 quiet 读确认提示符回来再继续",
     ]
     tail = [
@@ -1152,16 +1186,26 @@ def ops_result_text(name, r):
                     % (r.get("label"), r.get("sid"), r.get("command")))
         return "工具 ops_type 执行失败:%s" % r.get("error", "未知错误")
     if name == "ops_read":
+        stopped = bool(r.get("stopped"))
+        interrupted = bool(r.get("interrupted"))
+        # follow 超时已自动 Ctrl-C 收尾:不再给「等待超时/不要放置新命令」的围栏警示(那是 quiet 超时的话)
         text = _ops_fence(r.get("label") or "", r.get("text") or "",
-                          bool(r.get("timed_out")), bool(r.get("alive", True)))
+                          bool(r.get("timed_out")) and not stopped, bool(r.get("alive", True)))
+        if interrupted:
+            text += ("\n用户已终止盯日志(该终端收到 Ctrl-C):长驻命令已停、终端按已收尾处理,"
+                     "^C 回显与提示符在上方,可继续下一步")
+        elif stopped:
+            text += ("\nfollow 到点未命中,已自动向该终端发送 Ctrl-C 停止长驻命令:终端按已收尾处理,"
+                     "^C 回显与提示符在上方,可继续下一步")
         if r.get("matched"):
             text += "\n已命中 expect 模式,输出到此为止;命中内容已在上方,继续分析下一步"
         if r.get("truncated"):
             text += "\n输出超过单次读取上限已截断;继续调用 ops_read 可读取剩余增量(游标已推进)"
         if r.get("busy"):
             text += ("\n该终端仍未收尾(命令疑似还在运行,如 tail -f):不要向它放置新命令;"
-                     '先 ops_read(wait="quiet") 非超时收尾解锁;长驻命令请用户在该终端按 Ctrl-C,'
-                     "收到 [Ops] 中断触发后再 quiet 读确认提示符回来")
+                     '先 ops_read(wait="quiet") 非超时收尾解锁;长驻命令可发 ops_read(wait="follow", '
+                     'expect=不可命中正则, timeout_s=短)到点自动 Ctrl-C 收尾,或请用户在该终端按 Ctrl-C / '
+                     "点面板「终止盯日志」,收到 [Ops] 中断触发后再 quiet 读确认提示符回来")
         return text
     if name == "ops_broadcast":
         if r.get("ok"):

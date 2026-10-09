@@ -56,13 +56,28 @@ function opsOnInterrupt(ses) {
   if (!ses) return;
   const w = OPS.busy.get(ses.sid);
   if (!w) return;   // 该终端不在盯守:普通 Ctrl-C,直接放行
-  OPS.busy.delete(ses.sid);
+  opsFinishWatch(w, `[Ops] 已在 ${w.label} 按 Ctrl-C 中断。若有进行中的 ops_read(wait="follow") 盯守会立即以用户终止收尾;`
+    + `请调用 ops_read(terminal="${w.label}", wait="quiet") 确认提示符已回来(非超时收尾)后继续;若仍超时说明命令还在,可再次按 Ctrl-C。`,
+    "ops: " + w.label + " 已按 Ctrl-C 中断,但等待会话压缩完成超时——可让助手调用 ops_read 手动读取输出后继续");
+}
+
+/* 终止盯日志(busy chip 的「终止」按钮):向该终端发 Ctrl-C(走既有 sshWriteTo 写入通道,真 Ctrl-C 落 PTY,
+   后端进行中的 follow 盯守收到 \x03 即以「用户终止」立即收尾返回);随后与键盘 Ctrl-C 同路——
+   摘盯守、通知助手读取中断后输出,不背着助手静默摘除 */
+function opsStopWatch(w) {
+  const ses = sshSessions.find(x => x.sid === w.sid) || null;
+  if (ses && ses.alive) sshWriteTo(ses, "\x03");
+  opsFinishWatch(w, `[Ops] 已在 ${w.label} 终止盯日志(已向该终端发送 Ctrl-C)。若有进行中的 ops_read(wait="follow") `
+    + `会立即以用户终止收尾;请调用 ops_read(terminal="${w.label}", wait="quiet") 读取中断后的输出并确认提示符已回来。`,
+    "ops: " + w.label + " 已终止盯日志,但等待会话压缩完成超时——可让助手调用 ops_read 读取输出后继续");
+}
+
+/* 盯守收尾共通路径:摘盯守 + 通知 owner 会话(键盘 Ctrl-C 与「终止盯日志」按钮共用) */
+function opsFinishWatch(w, text, failToast) {
+  OPS.busy.delete(w.sid);
   opsPersist();
   opsRenderBar();
-  opsSendGuided(sessions.find(x => x.id === w.owner) || null,
-    `[Ops] 已在 ${w.label} 按 Ctrl-C 中断。请立即调用 ops_read(terminal="${w.label}", wait="quiet") `
-    + `确认提示符已回来(非超时收尾)后继续;若仍超时说明命令还在,可再次请用户按 Ctrl-C。`,
-    "ops: " + w.label + " 已按 Ctrl-C 中断,但等待会话压缩完成超时——可让助手调用 ops_read 手动读取输出后继续");
+  opsSendGuided(sessions.find(x => x.id === w.owner) || null, text, failToast);
 }
 
 /* 给 owner 会话发引导消息的共通路径。owner 回合压缩中:sendText 会拒发(压缩完成整体替换消息,
@@ -128,17 +143,19 @@ function opsRenderBar() {
     chip.querySelector("button").onclick = () => { OPS.armed.delete(a.sid); opsWithdrawLine(sshSessions.find(x => x.sid === a.sid) || null); opsPersist(); opsRenderBar(); };
     chips.push(chip);
   }
-  // 盯守 chip:长驻命令疑似仍在运行,按 Ctrl-C 通知助手中断(无取消按钮——背着助手摘盯守会把助手晾在补救半路;
-  // 同机多开 label 可能撞名,撞名时带 sid 消歧)
+  // 盯守 chip:长驻命令疑似仍在运行(可能有 follow 盯日志进行中)。「终止」按钮 = opsStopWatch:
+  // 发 Ctrl-C 停命令并通知助手收尾(不背着助手静默摘盯守);在终端里直接按 Ctrl-C 走 opsOnInterrupt 同一收尾路径;
+  // 同机多开 label 可能撞名,撞名时带 sid 消歧
   const busyList = Array.from(OPS.busy.values());
   for (const b of busyList) {
     if (b.owner !== curId) continue;
     const chip = document.createElement("span");
     chip.className = "queued-chip";
-    chip.title = "该终端有命令疑似仍在运行(长驻);在其中按 Ctrl-C 会通知助手中断并继续";
-    chip.innerHTML = `<span class="lbl">ops</span><span class="tx"></span>`;
+    chip.title = "该终端有命令疑似仍在运行(长驻);点「终止」或在该终端按 Ctrl-C 会停掉命令并通知助手收尾";
+    chip.innerHTML = `<span class="lbl">ops</span><span class="tx"></span><button title="终止盯日志:向该终端发送 Ctrl-C 停止长驻命令,并通知助手收尾">终止</button>`;
     const dup = busyList.filter(x => x.label === b.label).length > 1;
     chip.querySelector(".tx").textContent = "长驻命令 · " + b.label + (dup ? " · " + b.sid : "");
+    chip.querySelector("button").onclick = () => opsStopWatch(b);
     chips.push(chip);
   }
   // 读取输出中:lastRead 归属当前会话且其回合仍在生成(回合结束提示条自行消失)

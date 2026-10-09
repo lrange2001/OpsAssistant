@@ -58,6 +58,7 @@ class TermSession:
         self.written = 0      # 累计追加字节序号(单调递增)
         self.base = 0         # hist 首字节对应的序号(回绕后 >0)
         self.input_bytes = 0  # 用户键入字节累计(仅统计;回显本就经 PTY 输出流进 hist)
+        self.interrupts = 0   # 经 write() 落进 PTY 的 Ctrl-C(\x03)计数:ops follow 盯守循环轮询比对,感知用户终止
         self.last_ts = time.time()
         self.exited = None
         self.lock = threading.Lock()
@@ -141,6 +142,9 @@ class TermSession:
         if not b:
             return
         self.input_bytes += len(b)
+        if b"\x03" in b:   # Ctrl-C 计数:follow 盯守据此立即收尾(键盘直按/面板按钮都走本通道)
+            with self.lock:
+                self.interrupts += 1
         with self._wq_cond:
             self._wq.append(b)
             self._wq_cond.notify()

@@ -221,6 +221,17 @@ def api_ssh_hosts_save(body):
     if group and _bad_text(group, 64):
         return {"ok": False, "error": "字段 group 含非法字符(换行/控制字符)或超过 64 字符"}
     rec["group"] = group
+    # 环境标签与色点:可选,空串=无;tag 限长 16 的普通文本,color 只收小写字母色键
+    # (前端只提供固定预设 red/orange/purple/gray,样式类在 vue-ssh.css;正则放宽到 2-10 字母,
+    #  以后加预设不用动后端,未知色键前端按缺省灰色点渲染)
+    tag = str(body.get("tag") or "").strip()
+    if tag and _bad_text(tag, 16):
+        return {"ok": False, "error": "字段 tag 含非法字符(换行/控制字符)或超过 16 字符"}
+    color = str(body.get("color") or "").strip()
+    if color and not re.fullmatch(r"[a-z]{2,10}", color):
+        return {"ok": False, "error": "字段 color 需为小写字母色键(如 red/orange/purple/gray)"}
+    rec["tag"] = tag
+    rec["color"] = color
     try:
         rec["port"] = int(body.get("port") or 22)
         rec["persist_min"] = int(body.get("persist_min") or 15)

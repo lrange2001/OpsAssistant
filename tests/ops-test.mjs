@@ -707,8 +707,8 @@ async function uiTests() {
     chk(busyArr.length === 1 && busyArr[0].sid === "s1-mock" && busyArr[0].owner === ownerId,
         "ops_read busy=true 应登记盯守 s1-mock 且归属当前会话,实际: " + JSON.stringify(busyArr));
     const busyChip = bar.chips.find(c => c.tx.indexOf("长驻命令") === 0);
-    chk(!!busyChip && busyChip.tx.includes("ops@10.0.0.8") && !busyChip.hasX,
-        "ops-bar 应出现长驻命令 chip(带 label 无 x 按钮),实际: " + JSON.stringify(bar.chips));
+    chk(!!busyChip && busyChip.tx.includes("ops@10.0.0.8") && busyChip.hasX,
+        "ops-bar 应出现长驻命令 chip(带 label 与「终止」按钮),实际: " + JSON.stringify(bar.chips));
     const saved = await page.evaluate((owner) => {
       const s = sessions.find(x => x.id === owner);
       return (s && s.opsBusy) || [];
@@ -742,6 +742,42 @@ async function uiTests() {
     await sleep(300);
     const n2 = await page.evaluate(() => window.__chatBodies.length);
     chk(n2 === n1, "盯守外的普通 Ctrl-C 不得新发消息(" + n1 + " -> " + n2 + ")");
+
+    // 「终止盯日志」按钮:重新登记盯守(follow 工具结果 busy=true)后点 chip 上的终止——
+    // \x03 经 /api/ssh/write 落终端、[Ops] 终止消息发给助手、盯守清空 chip 消失
+    const idB = "call-op-rd-" + (++roundSeq);
+    await page.evaluate((idB) => {
+      window.__chatScript = async (push, close) => {
+        push({ type: "delta", content: "继续盯输出。" });
+        push({ type: "tool_call", id: idB, name: "ops_read", arguments: { terminal: "ops@10.0.0.8", wait: "follow", expect: "ERROR", timeout_s: 120 } });
+        push({ type: "tool_result", id: idB, name: "ops_read",
+          result: { ok: true, sid: "s1-mock", label: "ops@10.0.0.8", text: "TRK-3", timed_out: false, alive: true, wait: "follow", busy: true, truncated: false, matched: true, stopped: false, interrupted: false } });
+        push({ type: "done", reason: "stop", usage: { in: 30, out: 12 }, append_messages: [] });
+        close();
+      };
+    }, idB);
+    await sendUserMsg(page, input, "继续盯");
+    await page.evaluate(() => { window.__chatScript = null; });
+    bar = await opsBarState(page);
+    chk(bar.chips.some(c => c.tx.indexOf("长驻命令") === 0 && c.hasX),
+        "follow busy 结果应再登记长驻 chip(带终止按钮),实际: " + JSON.stringify(bar.chips));
+    const nB = await page.evaluate(() => window.__chatBodies.length);
+    const wB = await page.evaluate(() => (window.__ssh.bySid("s1-mock") || { writes: [] }).writes.join("").length);
+    await page.evaluate(() => {
+      const c = [...document.querySelectorAll("#ops-bar .queued-chip")]
+        .find(x => ((x.querySelector(".tx") || {}).textContent || "").indexOf("长驻命令") === 0);
+      if (c) c.querySelector("button").click();
+    });
+    const bodyB = await waitNewBody(page, nB);
+    const lastB = (bodyB.messages || []).slice(-1)[0] || {};
+    chk(lastB.role === "user" && /\[Ops\] 已在 ops@10\.0\.0\.8 终止盯日志/.test(String(lastB.content || "")),
+        "点「终止」应发 [Ops] 终止盯日志消息,实际: " + JSON.stringify(lastB).slice(0, 200));
+    const sentB = await page.evaluate(w0 => (window.__ssh.bySid("s1-mock") || { writes: [] }).writes.join("").slice(w0), wB);
+    chk(sentB.includes("\x03"), "点「终止」应经 /api/ssh/write 发 \\x03 到终端,实际: " + JSON.stringify(sentB.slice(-40)));
+    bar = await opsBarState(page);
+    const busyB = await page.evaluate(() => [...OPS.busy.values()].map(b => b.sid));
+    chk(busyB.length === 0 && !bar.chips.some(c => c.tx.indexOf("长驻命令") === 0),
+        "终止后盯守清空、长驻 chip 消失,实际: " + JSON.stringify({ busyB, chips: bar.chips }));
   });
 
   /* OP-11 aiops 准入:无终端拒入/有终端放行且不写全局默认/无终端发送回落 */
@@ -1091,8 +1127,9 @@ const PY = [
   "sesF.write('\\r')",
   "time.sleep(0.5)",
   "rg = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': 'NEVER-SHOWS', 'timeout_s': 1})",
-  "emit('D10: follow 未命中超时(matched=false 且 timed_out=true,文本带回显)且再置忙',",
-  "     rg.get('matched') is False and rg.get('timed_out') is True and 'PLAIN-1' in (rg.get('text') or '') and rg.get('busy') is True, rg)",
+  "emit('D10: follow 未命中超时(matched=false 且 timed_out=true,文本带回显)自动 Ctrl-C 收尾不置忙',",
+  "     rg.get('matched') is False and rg.get('timed_out') is True and 'PLAIN-1' in (rg.get('text') or '')",
+  "     and rg.get('stopped') is True and rg.get('busy') is False, rg)",
   "r0 = tool_ops_read({'terminal': sidF, 'wait': 'follow'})",
   "emit('D10: follow 缺 expect 拒绝', r0.get('ok') is False and 'expect' in (r0.get('error') or ''), r0)",
   "rb0 = tool_ops_read({'terminal': sidF, 'wait': 'follow', 'expect': '[unclosed', 'timeout_s': 1})",
@@ -1294,6 +1331,55 @@ const PY = [
   "emit('D18: ops 工具恒 auto 不受 aiops 影响',",
   "     permission_decision('aiops', 'ops_type', {'command': 'ls', 'terminal': 'x'}, cfg14) == 'auto'",
   "     and permission_decision('aiops', 'ops_read', {'terminal': 'x'}, cfg14) == 'auto', '')",
+  "",
+  "# D19 follow 收尾:到点未命中自动 Ctrl-C 停命令、用户 Ctrl-C 立即收、断开终端不挂死",
+  "sidT = TERMS.create(None, 100, 30)",
+  "sesT = TERMS.get(sidT)",
+  "time.sleep(0.8)",
+  "tool_ops_type({'command': 'sleep 30', 'terminal': sidT})",
+  "sesT.write('\\r')",
+  "time.sleep(0.3)",
+  "rt = tool_ops_read({'terminal': sidT, 'wait': 'follow', 'expect': 'NEVER-MATCH', 'timeout_s': 1})",
+  "emit('D19: follow 到点未命中自动 Ctrl-C(timed_out+stopped=true,matched=false 且 busy 解除)',",
+  "     rt.get('ok') is True and rt.get('timed_out') is True and rt.get('stopped') is True",
+  "     and rt.get('matched') is False and rt.get('busy') is False and OPS_BUSY.get(sidT) is None, rt)",
+  "rok2 = tool_ops_type({'command': 'echo AFTER-STOP-19', 'terminal': sidT})",
+  "emit('D19: 自动收尾后终端解锁,ops_type 放行', rok2.get('ok') is True, rok2)",
+  "sesT.write('\\r')",
+  "time.sleep(0.6)",
+  "ra = tool_ops_read({'terminal': sidT, 'wait': 'now'})",
+  "emit('D19: 中断真实生效——提示符已回,新命令执行出 AFTER-STOP-19',",
+  "     ra.get('ok') is True and 'AFTER-STOP-19' in (ra.get('text') or ''), (ra.get('text') or '')[-160:])",
+  "",
+  "# 用户终止:follow 盯守中(后台线程阻塞)该终端被写入 \\x03 → 立即以 interrupted=true 收尾,不等满超时",
+  "from threading import Thread",
+  "tool_ops_type({'command': 'sleep 30', 'terminal': sidT})",
+  "sesT.write('\\r')",
+  "time.sleep(0.3)",
+  "box = {}",
+  "th = Thread(target=lambda: box.__setitem__('r', tool_ops_read(",
+  "    {'terminal': sidT, 'wait': 'follow', 'expect': 'NEVER-MATCH', 'timeout_s': 20})))",
+  "th.start()",
+  "time.sleep(0.8)   # 等 follow 进入盯守循环(避免 \\x03 先于游标/计数快照落地的竞态)",
+  "t0 = time.time()",
+  "sesT.write('\\x03')   # 模拟用户按 Ctrl-C / 面板「终止盯日志」(键盘与按钮同走 write 通道)",
+  "th.join(10)",
+  "ru = box.get('r') or {}",
+  "emit('D19: 用户 Ctrl-C 立即收尾(interrupted=true 非超时,未等满 20s)',",
+  "     ru.get('ok') is True and ru.get('interrupted') is True and ru.get('timed_out') is False",
+  "     and ru.get('stopped') is False and (time.time() - t0) < 8,",
+  "     (ru, round(time.time() - t0, 1)))",
+  "emit('D19: 用户终止后 busy 解除', ru.get('busy') is False and OPS_BUSY.get(sidT) is None, ru)",
+  "",
+  "# 断开终端上的 follow:退出分支即收,不挂死、不抛未捕获异常",
+  "sesT.dispose()",
+  "wait_for(lambda: sesT.exited is not None, 6)",
+  "t0 = time.time()",
+  "rd = tool_ops_read({'terminal': sidT, 'wait': 'follow', 'expect': 'ANY', 'timeout_s': 5})",
+  "dt = time.time() - t0",
+  "emit('D19: 断开终端 follow 立即收(alive=false,未等满超时且不挂死)',",
+  "     rd.get('ok') is True and rd.get('alive') is False and dt < 3.0, (rd, round(dt, 2)))",
+  "TERMS.dispose(sidT)",
   "print('PYDONE', flush=True)",
 ].join("\n");
 

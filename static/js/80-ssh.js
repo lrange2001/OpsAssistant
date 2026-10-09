@@ -59,6 +59,24 @@ function sshDisposeChat(deadS) {
 }
 let sshHostsCache = [];      // 设置页与面板下拉共用
 let sshGroupsCache = [];     // 分组顺序(设置「连接」页维护;面板下拉 optgroup 共用)
+/* 拉取 /api/ssh/hosts 刷新两个全局缓存(设置页 reload、连接前取密码、命令中心条目共用);
+   失败沿用现有数据并返回 null,调用方按需区分「确认空」与「拉不到」 */
+async function sshRefreshHosts() {
+  try {
+    const j = await (await fetch("/api/ssh/hosts")).json();
+    if (!j || !Array.isArray(j.hosts)) return null;
+    sshHostsCache = j.hosts;
+    if (Array.isArray(j.groups)) sshGroupsCache = j.groups;
+    return sshHostsCache;
+  } catch { return null; }
+}
+/* 当前挂着存活终端的主机 id 集合(命令中心「已连接」标注与置顶用;
+   只报已建终端这一事实,不臆造主机可达性) */
+function sshAliveHostIds() {
+  const ids = new Set();
+  for (const ses of sshSessions) if (ses.alive && ses.hostId) ids.add(ses.hostId);
+  return ids;
+}
 async function sshPost(path, body) {
   const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   return await r.json();
@@ -179,7 +197,7 @@ async function sshConnect(hostId) {
   }
   try {
     // 连接前刷新主机缓存:取到该主机保存过的密码(保存过才自动填,只填一次)
-    try { sshHostsCache = ((await (await fetch("/api/ssh/hosts")).json()).hosts) || sshHostsCache; } catch {}
+    await sshRefreshHosts();
     const j = await sshPost("/api/ssh/connect", { host_id: hostId, cols: sshCols(), rows: sshRows() });
     if (!j.ok) { toast("SSH connect failed: " + (j.error || ""), "err"); return; }
     if (sshSessions.length >= 8) {   // 全局终端上限(1:1 配对下即带终端的会话数)
@@ -380,7 +398,7 @@ async function sshReattach() {
     const j = await (await fetch("/api/ssh/status")).json();
     const alive = (j.sessions || []).filter(x => x.alive);
     if (!alive.length) { renderSshTabs(); return; }   // 无终端也画一次标签条:空面板照样有 +(点击给 /ssh 指引)
-    try { sshHostsCache = ((await (await fetch("/api/ssh/hosts")).json()).hosts) || sshHostsCache; } catch {}
+    await sshRefreshHosts();
     let firstUnowned = true, listDirty = false;
     for (const x of alive) {
       if (sshSessions.some(ses => ses.sid === x.sid)) continue;

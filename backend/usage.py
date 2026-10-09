@@ -15,8 +15,10 @@ _usage_lock = threading.Lock()
 def log_usage(record):
     with _usage_lock:
         try:
-            os.makedirs(datadir.DATA_DIR, exist_ok=True)
-            with open(datadir.USAGE_PATH, "a", encoding="utf-8") as f:
+            os.makedirs(datadir.DATA_DIR, mode=0o700, exist_ok=True)
+            # 追加写台账:os.open 显式 0600(创建即收紧,避开先建后 chmod 的竞态;已有文件不追改)
+            fd = os.open(datadir.USAGE_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             pass

@@ -6,7 +6,19 @@
    之后每次调用只触发组件 reload()(重新 fetch /api/ssh/hosts 刷新响应式数据)。 */
 /* 结构说明:DOM 顺序为 分组管理 → 编辑卡 → 主机卡,视觉顺序用 CSS flex order 排成
    编辑卡(展开时在最上)→ 主机卡 → 分组管理;DOM 里分组管理放最前是为了兼容
-   tests/ssh2-ui-test.mjs 的「新建分组」按钮启发式定位(按文档序找第一个 新建/添加/创建 按钮)。 */
+   tests/ssh2-ui-test.mjs 的「新建分组」按钮启发式定位(按文档序找第一个 新建/添加/创建 按钮,
+   以及「第一个非 ssh-h-* 前缀的普通 input = 新分组输入框」——主机卡的过滤框因此不占先:
+   它在主机卡内、文档序恒晚于 #ssh-g-name,且类型为 radio 的标签预设也不参与该启发式)。 */
+
+/* 环境标签预设:「文案 + 色点」成对单选(首项「无」= 清空);不做自由填色,保持简单。
+   颜色不内联色值,样式类统一在 vue-ssh.css(.ssh-dot-<色键> / .ssh-tag-<色键>,未知色键回退缺省灰)。 */
+const SSH_TAG_PRESETS = [
+  { tag: "", color: "", name: "无" },
+  { tag: "生产", color: "red", name: "生产" },
+  { tag: "测试", color: "orange", name: "测试" },
+  { tag: "staging", color: "purple", name: "staging" },
+  { tag: "备用", color: "gray", name: "备用" },
+];
 /* 对外契约(保持不变):
    - 全局 renderSshHosts / saveSshHost / cancelSshHostEdit 供 99-boot.js 绑定;
    - #btn-save-ssh-host / #btn-cancel-ssh-host / #ssh-form-title / #ssh-hosts-list / #ssh-h-* 输入 ID 保留;
@@ -89,6 +101,17 @@ const SSH_CONN_TEMPLATE = `
       <input class="sp-input" id="ssh-h-persist" inputmode="numeric" v-model="form.persist_min" spellcheck="false"></label>
     <label class="field ssh-f-half">备注(可选)
       <input class="sp-input" id="ssh-h-notes" v-model="form.notes"></label>
+    <div class="field ssh-f-full ssh-tag-field">
+      <span class="ssh-tag-field-label">环境标签(可选;主机列表名前色点 + 行尾小标签)</span>
+      <div class="ssh-tag-chips">
+        <label v-for="p in tagPresets" :key="p.tag || '__none'" class="ssh-tag-chip"
+               :class="{ on: form.tag === p.tag && (!p.color || form.color === p.color) }"
+               :title="p.color ? '标签「' + p.name + '」,色点 ' + p.color : '不设环境标签'">
+          <input type="radio" name="ssh-h-tag" :value="p.tag" v-model="form.tag" @change="form.color = p.color">
+          <span v-if="p.color" class="ssh-dot" :class="'ssh-dot-' + p.color"></span><span>{{ p.name }}</span>
+        </label>
+      </div>
+    </div>
     <label class="field ssh-f-full">密码(可选,明文存本机;连接遇到 password 提示自动填一次,留空 = 清除已存密码)
       <input class="sp-input" id="ssh-h-pass" type="text" spellcheck="false" autocomplete="off" placeholder="留空则每次手动输入" v-model="form.password"></label>
   </div>
@@ -104,6 +127,8 @@ const SSH_CONN_TEMPLATE = `
     <h3>远程主机(SSH)</h3>
     <button class="mini-btn primary ssh-add-btn" @click="openAdd">添加主机</button>
   </div>
+  <input class="sp-input ssh-search" id="ssh-hosts-filter" type="text" spellcheck="false"
+         placeholder="过滤主机:名称 / 主机 / 用户 / 备注子串" v-model="q">
   <div class="ssh-chips">
     <button v-for="c in chips" :key="c.key" class="ssh-chip" :class="{ on: filter === c.key }"
             :title="c.name" @click="filter = c.key">
@@ -116,9 +141,12 @@ const SSH_CONN_TEMPLATE = `
         <div class="ssh-sec-title"><span>{{ sec.name }}</span></div>
         <div class="ssh-host-row" v-for="h in sec.hosts" :key="h.id">
           <div class="ssh-host-info" :title="rowTitle(h)">
-            <div class="ssh-host-name">{{ h.label || h.host }}</div>
+            <div class="ssh-host-name">
+              <span v-if="h.color" class="ssh-dot" :class="'ssh-dot-' + h.color"></span>{{ h.label || h.host }}
+            </div>
             <div class="ssh-host-conn">{{ connStr(h) }}</div>
           </div>
+          <span v-if="h.tag" class="ssh-tag" :class="h.color ? 'ssh-tag-' + h.color : ''" title="环境标签">{{ h.tag }}</span>
           <div class="ssh-host-acts">
             <button class="ssh-act-conn" @click="connect(h)">连接</button>
             <button class="ssh-act" @click="editHost(h)">编辑</button>
@@ -127,7 +155,7 @@ const SSH_CONN_TEMPLATE = `
         </div>
         <div class="hint-text ssh-sec-empty" v-if="!sec.hosts.length">该分组还没有主机,点右上「添加主机」。</div>
       </div>
-      <div class="hint-text" v-if="!visibleSections.length">该筛选下没有主机。</div>
+      <div class="hint-text" v-if="!visibleSections.length">{{ emptyHint }}</div>
     </template>
     <div class="hint-text" v-else>还没有主机:点右上「添加主机」创建第一台。密码字段可选(明文存本机,连接遇到 password 提示自动填一次);MFA/OTP 在连接后的终端里手动输入。</div>
   </div>
@@ -140,6 +168,7 @@ const SshConnApp = {
       groups: [],           // 与全局 sshGroupsCache 同步(顺序即展示顺序)
       newGroup: "",
       filter: "__all",      // 当前分组筛选:"__all" 全部 / "__ungrouped" 未分组 / 分组名
+      q: "",                // 主机过滤关键词(实时;与分组筛选叠加,label/host/user/notes 小写子串)
       editing: null,        // 正在编辑的主机对象(null = 新建)
       formOpen: false,      // 编辑卡是否展开(常驻 DOM,收起时 display:none)
       formError: "",        // 编辑卡内的行内校验/提交错误
@@ -149,6 +178,7 @@ const SshConnApp = {
   computed: {
     formTitle() { return this.editing ? "编辑主机 " + (this.editing.label || this.editing.host) : "新建主机"; },
     saveLabel() { return this.editing ? "保存修改" : "保存主机"; },
+    tagPresets() { return SSH_TAG_PRESETS; },
     /* 分节:groups 顺序(空组也保留)+ 末尾「未分组」(group 为空或组已不存在的主机) */
     sections() {
       const gs = this.groups || [];
@@ -166,11 +196,26 @@ const SshConnApp = {
       chips.push({ key: "__ungrouped", name: "未分组", n: this.hosts.filter(h => !(this.groups || []).includes(h.group || "")).length });
       return chips;
     },
-    /* 按 chips 筛选后的分节(「全部」= 全部分节,含空组小标题) */
+    /* 关键词过滤后的分节:命中任一字段(label/host/user/notes 小写子串)才留;
+       有关键词时空节整个丢弃(不显示「该分组还没有主机」误导);无关键词 = 原样 */
+    searchedSections() {
+      const q = (this.q || "").trim().toLowerCase();
+      if (!q) return this.sections;
+      return this.sections
+        .map(s => ({ ...s, hosts: s.hosts.filter(h => [h.label, h.host, h.user, h.notes]
+          .some(v => (v || "").toLowerCase().includes(q))) }))
+        .filter(s => s.hosts.length);
+    },
+    /* 关键词 + chips 双重筛选后的分节(「全部」= 全部分节,含空组小标题) */
     visibleSections() {
-      if (this.filter === "__all") return this.sections;
-      if (this.filter === "__ungrouped") return this.sections.filter(s => s.un);
-      return this.sections.filter(s => !s.un && s.name === this.filter);
+      if (this.filter === "__all") return this.searchedSections;
+      if (this.filter === "__ungrouped") return this.searchedSections.filter(s => s.un);
+      return this.searchedSections.filter(s => !s.un && s.name === this.filter);
+    },
+    /* 空态提示:有关键词时点名关键词并给清空指引,否则沿用分组筛选的提示 */
+    emptyHint() {
+      const q = (this.q || "").trim();
+      return q ? `没有匹配「${q}」的主机:换个关键词,或清空过滤框 / 切换分组试试。` : "该筛选下没有主机。";
     },
   },
   methods: {
@@ -213,6 +258,7 @@ const SshConnApp = {
         persist_min: h.persist_min ?? 15, notes: h.notes || "",
         password: h.password || "",   // 点击编辑即可查看已存密码
         group: h.group || "",
+        tag: h.tag || "", color: h.color || "",   // 环境标签与色点(预设成对;存量自定义值不在预设里也不丢)
       };
       this.formError = "";
       this.formOpen = true;
@@ -242,6 +288,8 @@ const SshConnApp = {
         const el = document.getElementById(id);
         if (el) el.value = v == null ? "" : String(v);
       }
+      /* 标签预设是 radio 组(name 定位,无 id):以表单状态为准重勾 */
+      document.querySelectorAll('input[name="ssh-h-tag"]').forEach(r => { r.checked = r.value === (this.form.tag || ""); });
     },
     /* DOM → 表单状态:保存前同步,把外部直写(密钥卡「填入表单」)的值一并带走 */
     syncFormFromDom() {
@@ -253,6 +301,13 @@ const SshConnApp = {
       }
       const g = document.getElementById("ssh-h-group");
       if (g) this.form.group = g.value;
+      /* 勾中的标签预设:文案 + 色键成对带回(未勾中 = 存量自定义标签,保持 form 原值不动) */
+      const r = document.querySelector('input[name="ssh-h-tag"]:checked');
+      if (r) {
+        this.form.tag = r.value;
+        const p = SSH_TAG_PRESETS.find(x => x.tag === r.value);
+        this.form.color = p ? p.color : "";
+      }
     },
     async save() {
       this.syncFormFromDom();
@@ -271,6 +326,7 @@ const SshConnApp = {
         persist_min: String(f.persist_min).trim(), notes: f.notes.trim(),
         password: f.password,   // 不 trim:密码可能首尾带空格;空 = 清除已存密码
         group: f.group || "",
+        tag: f.tag || "", color: f.color || "",
         ...(this.editing ? { id: this.editing.id } : {}),
       };
       try {
@@ -320,5 +376,5 @@ const SshConnApp = {
 };
 
 function sshConnEmptyForm() {
-  return { label: "", host: "", port: "22", user: "", key_path: "", jump: "", persist_min: "15", notes: "", password: "", group: "" };
+  return { label: "", host: "", port: "22", user: "", key_path: "", jump: "", persist_min: "15", notes: "", password: "", group: "", tag: "", color: "" };
 }

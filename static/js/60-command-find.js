@@ -28,13 +28,39 @@ function openCmdk() {
   $("cmdk").classList.add("open");
   const q = $("cmdk-q"); q.value = "";
   cmkRender("");
+  cmkEnsureHosts();
   setTimeout(() => q.focus(), 0);
 }
 function closeCmdk() { $("cmdk").classList.remove("open"); }
+/* ---- SSH 主机一等条目:主机库从设置页提升为全局快捷入口(连接与设置页「连接」按钮同走 sshConnect) ---- */
+let cmkSshTried = false;   // 是否已成功拉取过主机列表(成功且为空才提示「还没有主机」,拉取失败不臆断)
+function cmkEnsureHosts() {
+  if (cmkSshTried || sshHostsCache.length) return;   // boot 的 renderSshHosts 已预热缓存,通常直接返回
+  sshRefreshHosts().then(hosts => {
+    if (hosts == null) return;   // 拉取失败:保持未确认,下次打开再试
+    cmkSshTried = true;
+    if ($("cmdk").classList.contains("open")) cmkRender($("cmdk-q").value);   // 结果落地时面板还开着:按当前关键词重渲
+  });
+}
+function cmkHostItems() {
+  if (!sshHostsCache.length) {
+    // 空主机库提示:复用命令中心既有的 openSettingsTab 机制,回车直达 设置 > 连接
+    return cmkSshTried ? [{ kind: "hint", name: "SSH 连接:还没有主机", ds: "回车打开 设置 > 连接 添加", tag: "ssh", run: () => openSettingsTab("ssh") }] : [];
+  }
+  const alive = sshAliveHostIds();
+  return sshHostsCache.map(h => {
+    const live = alive.has(h.id);   // 只标注「挂着存活终端」这一可得事实
+    return { kind: "host", name: h.label || h.host, live,
+      ds: (h.user || "-") + "@" + h.host + ":" + (h.port || 22) + (h.jump ? "  -J " + h.jump : "")
+        + " · " + (h.group || "未分组") + (live ? " · 已连接" : ""),
+      tag: "ssh", run: () => sshConnect(h.id) };
+  }).sort((a, b) => (b.live - a.live) || a.name.localeCompare(b.name));   // 已连接置顶,其余按名称字母序
+}
 function cmkRender(qs) {
   const q = qs.trim();
   let pool = [
     ...CMK_ACTIONS.map(a => ({ kind: "action", name: a.name, ds: a.ds, tag: "action", run: a.run })),
+    ...cmkHostItems(),
     ...SLASH.map(c => ({ kind: "cmd", name: "/" + c.name, ds: c.desc, tag: "command", run: () => handleSlashCommand("/" + c.name) })),
     ...(cfgData.custom_commands || []).filter(c => c.enabled).map(c => ({ kind: "cmd", name: "/" + c.name, ds: c.description || "", tag: "custom", run: () => handleSlashCommand("/" + c.name) })),
     ...sessions.map(s => ({ kind: "sess", name: s.title, ds: (s.messages || []).length + " messages · " + fmtDT(s.created) + (s.archived ? " · archived" : ""), tag: "chat", run: () => switchSession(s.id) })),

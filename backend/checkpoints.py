@@ -14,6 +14,22 @@ def _cp_path(cp_id):
     return os.path.join(datadir.CHECKPOINT_DIR, cp_id)
 
 
+def _new_file(path, mode, encoding=None):
+    """检查点文件统一新建方式:os.open 显式 0600,创建即收紧(避开先建后 chmod 的竞态窗口;
+    umask 只会再收紧、不会放宽属主位)。检查点快照的是被改文件的全文,可能含密码/私钥等
+    敏感内容,必须仅属主可读写。"""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    return os.fdopen(fd, mode, encoding=encoding)
+
+
+def _ensure_cp_dirs(d):
+    """检查点目录创建时即 0700(已存在的不追改,尊重用户设定);makedirs 的 mode 只作用于
+    叶子目录,DATA_DIR → checkpoints → <id> 需逐级各建一次,避免父级以缺省权限冒出来。"""
+    os.makedirs(datadir.DATA_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(datadir.CHECKPOINT_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+
+
 def create_checkpoint(paths, label="", session_hint=""):
     """把一批文件的当前内容快照到 checkpoints/<id>/,返回 manifest。
     恢复时按 manifest 把内容写回。id 形如 cp-<ms>-<rand4>。"""
@@ -27,9 +43,9 @@ def create_checkpoint(paths, label="", session_hint=""):
                 files.append({"path": ap, "snap": None})  # 当时不存在(新建的前身)
                 continue
             rel = re.sub(r"[^A-Za-z0-9._-]", "_", ap.replace(os.sep, "__"))[-120:] + "-" + os.urandom(3).hex()
-            os.makedirs(d, exist_ok=True)
+            _ensure_cp_dirs(d)
             shutil_snap = os.path.join(d, rel)
-            with open(ap, "rb") as src, open(shutil_snap, "wb") as dst:
+            with open(ap, "rb") as src, _new_file(shutil_snap, "wb") as dst:
                 dst.write(src.read())
             files.append({"path": ap, "snap": rel})
         except OSError:
@@ -38,9 +54,9 @@ def create_checkpoint(paths, label="", session_hint=""):
         "id": cp_id, "createdAt": int(time.time() * 1000), "label": label or "",
         "session": session_hint, "files": files,
     }
-    os.makedirs(d, exist_ok=True)
+    _ensure_cp_dirs(d)
     tmp = os.path.join(d, "manifest.json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
+    with _new_file(tmp, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
     os.replace(tmp, os.path.join(d, "manifest.json"))
     return manifest

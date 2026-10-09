@@ -176,14 +176,15 @@ def api_commands_save(body):
         if c["name"] == name and c["name"] != old:
             return {"ok": False, "error": f"命令 /{name} 已存在(commands/{name}.md)"}
     target = os.path.join(datadir.COMMANDS_DIR, *segs) + ".md"
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)  # 数据目录子项,创建时即 0700
     fm = []
     if (body.get("description") or "").strip():
         fm.append("description: " + body["description"].strip().replace("\n", " "))
     if (body.get("argument_hint") or "").strip():
         fm.append("argument-hint: " + body["argument_hint"].strip().replace("\n", " "))
     md = ("---\n" + "\n".join(fm) + "\n---\n\n" if fm else "") + prompt + "\n"
-    with open(target, "w", encoding="utf-8") as f:
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 提示词可能含内网信息,创建即 0600
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(md)
     if old and old != name:
         prev = next((c for c in load_custom_commands() if c["name"] == old), None)

@@ -1,4 +1,5 @@
-/* SSH 连接页 Vue 组件样式(FE-CONN 重做):分组 chips 筛选 + 主机列表卡片化 + 弹出式编辑卡 + 轻量分组管理。
+/* SSH 连接页 Vue 组件样式(FE-CONN 重做):分组 chips 筛选 + 主机过滤框 + 主机列表卡片化
+   + 弹出式主机编辑卡(含环境标签预设 chips)+ 轻量分组管理。
    沿用现有视觉语言(默认纯黑主题 + data-theme="light" 浅色),变量参考 static/style.css 的 :root;
    卡片/输入/按钮基础样式复用 .set-card / .field / .sp-input / .mini-btn / .hint-text。
    DOM 顺序为 分组管理 → 编辑卡 → 主机卡,这里用 flex order 排成 编辑卡 → 主机卡 → 分组管理
@@ -21,6 +22,33 @@
   color: var(--muted); background: var(--panel2);
   border: 1px solid var(--border); border-radius: 99px; padding: 3px 7px;
 }
+
+/* ---- 主机过滤框:主机卡顶部、分组 chips 之上;与分组筛选叠加(实时小写子串) ---- */
+#vue-ssh-conn .ssh-search { margin: 0 0 8px; }
+
+/* ---- 环境色点:列表名前 / 标签预设 chip 内共用;色值只在 .ssh-dot-<色键> 定义一处,
+        未知色键不设 --ssh-dot-c 时回退缺省灰(不出现隐形点) ---- */
+#vue-ssh-conn .ssh-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 99px;
+  background: var(--ssh-dot-c, var(--muted)); flex-shrink: 0;
+}
+#vue-ssh-conn .ssh-host-name .ssh-dot { margin-right: 6px; }
+#vue-ssh-conn .ssh-dot-red    { --ssh-dot-c: #e5484d; }
+#vue-ssh-conn .ssh-dot-orange { --ssh-dot-c: #f76b15; }
+#vue-ssh-conn .ssh-dot-purple { --ssh-dot-c: #8e4ec6; }
+#vue-ssh-conn .ssh-dot-gray   { --ssh-dot-c: #8f8f8f; }
+
+/* ---- 行尾环境标签 chip:小号描边 pill;有色键时文字/描边跟色,缺省灰 ---- */
+#vue-ssh-conn .ssh-tag {
+  display: inline-flex; align-items: center; flex-shrink: 0;
+  font-size: 10.5px; line-height: 1; white-space: nowrap; user-select: none;
+  color: var(--ssh-tag-c, var(--muted)); border: 1px solid var(--ssh-tag-c, var(--border));
+  border-radius: 99px; padding: 3px 8px;
+}
+#vue-ssh-conn .ssh-tag-red    { --ssh-tag-c: #e5484d; }
+#vue-ssh-conn .ssh-tag-orange { --ssh-tag-c: #f76b15; }
+#vue-ssh-conn .ssh-tag-purple { --ssh-tag-c: #8e4ec6; }
+#vue-ssh-conn .ssh-tag-gray   { --ssh-tag-c: #8f8f8f; }
 
 /* ---- 分组 chips:点击即过滤主机列表,active 高亮 ---- */
 /* inactive 用 var(--bg) 底 + 正文字色(比全局 .chip 的 muted 字提一档对比);hover 亮边框 + 微亮底 */
@@ -88,6 +116,24 @@
 #vue-ssh-conn .ssh-f-full { grid-column: 1 / -1; }
 #vue-ssh-conn .ssh-form-err { color: var(--danger); font-size: 12px; margin: 0 0 6px; }
 #vue-ssh-conn .ssh-form-foot { display: flex; gap: 8px; margin-bottom: 8px; }
+
+/* ---- 编辑卡·环境标签预设 chips:文案+色点成对单选(radio 视觉隐藏,样式与 .ssh-chip 同语言) ---- */
+#vue-ssh-conn .ssh-tag-field { margin-bottom: 10px; }
+#vue-ssh-conn .ssh-tag-field-label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+#vue-ssh-conn .ssh-tag-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+#vue-ssh-conn .ssh-tag-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 99px;
+  padding: 4px 12px; cursor: pointer; user-select: none; white-space: nowrap;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+#vue-ssh-conn .ssh-tag-chip input[type="radio"] {
+  position: absolute; width: 0; height: 0; margin: 0; opacity: 0; pointer-events: none;
+}
+#vue-ssh-conn .ssh-tag-chip:hover { border-color: var(--accent); background: var(--panel2); }
+#vue-ssh-conn .ssh-tag-chip:has(input:focus-visible) { border-color: var(--accent); }
+#vue-ssh-conn .ssh-tag-chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-weak); }
 @media (max-width: 620px) {
   #vue-ssh-conn .ssh-form-grid { grid-template-columns: 1fr; }
   #vue-ssh-conn .ssh-f-half, #vue-ssh-conn .ssh-f-user,

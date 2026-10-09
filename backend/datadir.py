@@ -58,7 +58,7 @@ def _read_legacy_pointer():
 def _ensure_dir(path):
     """确保数据目录存在;不可建(如卷未挂载)返回 False,由上级落到下一来源"""
     try:
-        os.makedirs(path, exist_ok=True)
+        os.makedirs(path, mode=0o700, exist_ok=True)   # 创建时即仅属主(已存在不追改)
         return True
     except OSError as e:
         print("[datadir] 数据目录不可用 %s(%s)" % (path, e))
@@ -82,7 +82,7 @@ def _move_data_items(src, dst):
     """把 src 下的数据项逐项 move 到 dst(目标同名项若是空目录则先删空目录再搬,零数据风险;
     其余同名冲突报错;中途失败回滚已移项)。返回 (True, "") 或 (False, 错误说明)。"""
     items = [n for n in DATA_ITEMS if os.path.lexists(os.path.join(src, n))]
-    os.makedirs(dst, exist_ok=True)
+    os.makedirs(dst, mode=0o700, exist_ok=True)
     for n in items:
         d = os.path.join(dst, n)
         if os.path.isdir(d) and not os.listdir(d):
@@ -107,7 +107,8 @@ def _move_data_items(src, dst):
 def _write_user_config(path):
     """位置记录原子写入 ~/.assistant_config(本应用专属,整文件重写)"""
     tmp = USER_CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 创建即 0600,避开先建后 chmod 的竞态
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump({"data_dir": path}, f, ensure_ascii=False, indent=2)
         f.write("\n")
     os.replace(tmp, USER_CONFIG_PATH)

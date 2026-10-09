@@ -80,7 +80,11 @@ def automation_run_headless(a):
     """无人值守跑一轮 automation:走 ccswitch 当前模型,auto 权限(拒绝规则仍生效),输出落 runs/*.json"""
     aid = a["id"]
     runs_dir = os.path.join(datadir.AUTOMATION_DIR, aid, "runs")
-    os.makedirs(runs_dir, exist_ok=True)
+    # 三级目录逐级创建、创建时即 0700(makedirs 的 mode 只作用于叶子);runs 里是无人值守
+    # 全程转录(提示词/命令输出/主机信息),仅属主可进
+    os.makedirs(datadir.AUTOMATION_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(os.path.join(datadir.AUTOMATION_DIR, aid), mode=0o700, exist_ok=True)
+    os.makedirs(runs_dir, mode=0o700, exist_ok=True)
     ts = int(time.time() * 1000)
     out_path = os.path.join(runs_dir, "%d.json" % ts)
     cwd = a.get("cwd") or os.path.expanduser("~")
@@ -90,7 +94,8 @@ def automation_run_headless(a):
     record = _autonomous_loop(provider, DEFAULT_SYSTEM_PROMPT + "\n\n" + extra, a.get("prompt", ""),
                               cwd=cwd, tools=TOOL_DEFS, max_rounds=12, mode=a.get("mode", "yolo"))
     record.update({"id": aid, "ts": ts, "title": a.get("title", ""), "prompt": a.get("prompt", "")})
-    with open(out_path, "w", encoding="utf-8") as f:
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 转录含敏感输出,创建即 0600
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(record, f, ensure_ascii=False, indent=1)
     log_usage({"ts": ts // 1000, "host": provider.get("host", ""), "model": provider.get("model", ""),
                "in": record["usage"]["in"], "out": record["usage"]["out"], "automation": aid})
