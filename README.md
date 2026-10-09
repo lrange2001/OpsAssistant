@@ -2,9 +2,9 @@
 
 # ForFreedom Assistant
 
-**Mac 专用的内网运维 AI 助手** —— 把「SSH 登服务器敲命令」和「问 AI」合进一个窗口
+**A Mac-native AI ops copilot for intranet operations** — an SSH terminal and "ask the AI" in one window
 
-**Mac-native AI ops copilot** — a real SSH terminal beside the chat; one shortcut quotes live terminal output to the model, and **ops / aiops modes let the model drive your terminals** (aiops: read-only probes auto-run, every write waits for your Enter). MCP plugins · cc-switch model routing · 100% local data
+**Mac 专用内网运维 AI 助手**:左侧真实 SSH 终端、右侧 AI 对话,ops / aiops 模式让模型直接驱动终端——命令它来放,回车你来按
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Apple%20Silicon-black.svg)
@@ -12,142 +12,162 @@
 ![Build](https://img.shields.io/badge/build-zero%20steps-2EA44F.svg)
 ![Model](https://img.shields.io/badge/model-cloud%20%7C%20llama--server%20%7C%20intranet-8A2BE2.svg)
 
-自包含 · 零构建步骤 · 零运行时依赖 · 内网离线可用
+**English** · [简体中文](./README.zh-CN.md)
 
-![ForFreedom Assistant 对话界面](docs/screenshots/chat-dark.png)
+Self-contained · zero build steps · zero runtime dependencies · works fully offline on an intranet
+
+![ForFreedom Assistant chat interface](docs/screenshots/chat-dark.png)
 
 </div>
 
-## 它是什么
+## What it is
 
-ForFreedom Assistant 是跑在 Mac 上的**工具代理型 AI 助手**,面向内网运维:左侧真实 SSH 终端、右侧 AI 对话,Cmd/Ctrl+Shift+T 一键把终端新增输出抓成引用带给模型——「刚才这条报错,帮我看看」直接有上下文。更进一步,**ops / aiops 两种模式让模型直接驱动终端干活**:排查命令自动跑、修复命令逐条等你回车(详见下文[两种运维模式](#两种运维模式ops-与-aiops))。
+ForFreedom Assistant is a **tool-agent AI assistant** that runs on your Mac, built for intranet ops: a real SSH terminal on the left, an AI chat on the right. One shortcut (Cmd/Ctrl+Shift+T) grabs the terminal's latest output as a quote for the model — "this error just happened, look at it" comes with context attached. One step further, **ops / aiops modes let the model drive your terminals itself**: probe commands run automatically, repair commands wait for your Enter one by one (see [The two ops modes](#the-two-ops-modes-ops--aiops)).
 
-后端是仅用标准库的 Python 包(根 server.py 为薄壳入口),前端原生 JS(Vue 已 vendored),无 Node、无构建;服务只监听 `127.0.0.1`,模型接入完全委托 ccswitch——云端供应商与本地 llama-server 一切即换,敏感数据可以完全不出内网。
+The backend is a Python package using only the standard library (root `server.py` is a thin shell); the frontend is vanilla JS (Vue vendored) — no Node, no build step. The server listens on `127.0.0.1` only, and model access is fully delegated to ccswitch: cloud providers and a local llama-server are one switch apart, so sensitive data never has to leave your intranet.
 
-![SSH 左右分栏](docs/screenshots/ssh-dark.png)
+![SSH split view](docs/screenshots/ssh-dark.png)
 
-## 功能一览
+## Feature overview
 
 | | |
 | --- | --- |
-| **SSH 多终端** | 主机档案 + 分组管理、密钥管理(生成/指纹/公钥)、密码可选记忆、环境标签/色点、Cmd+K 直达直连、多终端标签,每个终端与一个聊天会话 1:1 配对 |
-| **左终端右对话** | 真实 PTY 终端,支持 vim/top 等全屏程序;竖直分隔条拖宽;Cmd+1~4 聚焦/轮换/开合 |
-| **终端上下文引用** | Cmd/Ctrl+Shift+T 把当前终端新增输出抓成引用 chip 带给模型;`/download`、`/upload` 走 SSH 复用通道免二次认证,路径参数免 Tab 自动补全(远端经复用通道、唯一目录自动下钻) |
-| **定时巡检** | 无人值守任务(每天 9 点检查磁盘/容器状态并总结之类),应用开着自动跑(当前为本机任务);运行记录一键「转 ops 处理」,带着结果进 ops 会话定位问题 |
-| **ops 模式** | `/mode ops` 进入:模型把命令逐台打进在线 SSH 终端输入行、绝不代按回车,你回车执行、输出自动读回分析,逐台链式直到完成;同机多开的终端自动分组,同组只放一台;排障增强:ops_facts 主机画像(只读探测、跨会话缓存)、ops_broadcast 多机群发对比找不同、盯日志 follow 读取(正则命中即收、超时自动 Ctrl+C 收口、面板可终止)、排障技能(runbook)准入该模式 |
-| **aiops 模式** | `/mode aiops` 进入:ops 的排查加速变体——只读排查命令免回车自动执行(逐段判定 + 写黑名单兜底,包装器/`sh -c`/`docker exec` 内层负载递归判定),写入/变更仍逐条人审;先排查、后结论、再修复 |
-| **本地开发全套** | 命令执行实时输出、文件读写 diff、Git 面板(分支/提交/推送确认)、改文件前自动检查点可回滚 |
-| **工程化对话** | 多会话并行生成、排队/引导两种运行中输入、深度思考折叠、上下文压缩(可视化进度,可取消)、长文本折叠、`@` 文件引用、`$` 技能、子代理、MCP 插件、Cmd+K 命令中心、全量快捷键改绑 |
+| **SSH multi-terminal** | Host profiles + groups, key management (generate/fingerprint/public key), optional password memory, environment tags/color dots, Cmd+K quick connect, terminal tabs; each terminal pairs 1:1 with a chat session |
+| **Terminal left, chat right** | Real PTY terminals; fullscreen apps like vim/top work; draggable vertical splitter; Cmd+1~4 focus/rotate/open-close |
+| **Terminal context quoting** | Cmd/Ctrl+Shift+T captures a terminal's new output as a quote chip for the model; `/download`, `/upload` ride the SSH multiplexed channel (no second auth), path args auto-complete without Tab |
+| **Scheduled inspections** | Unattended tasks (e.g. check disk/container status daily at 9:00 and summarize) run while the app is open; run records convert to an ops session with one click |
+| **ops mode** | `/mode ops`: the model types each command into a live SSH terminal's **input line and never presses Enter** — you review and press Enter, output is read back automatically, host by host until done. Extras: `ops_facts` host profiling (read-only, cached), `ops_broadcast` multi-host fan-out diffing, follow log watching (regex hit collects, timeout auto-Ctrl+C, panel stop button), ops runbook skills |
+| **aiops mode** | `/mode aiops`: the accelerated variant — read-only probe commands auto-execute (segment-wise classification + write blacklist, recursive into wrappers/`sh -c`/`docker exec` payloads), while writes/changes still wait for your Enter one by one: probe, conclude, then repair |
+| **Full local dev kit** | Live command output, file read/write diffs, Git panel (branch/commit/push confirmations), auto checkpoints before edits with rollback |
+| **Engineering-grade chat** | Parallel sessions, queued/steering input while running, collapsible deep thinking, context compaction (visual progress, cancelable), long-text folding, `@` file refs, `$` skills, subagents, MCP plugins, Cmd+K command center, full hotkey rebinding |
 
-完整说明见[使用手册](./使用手册.md)。
+The full user manual is currently Chinese: [使用手册](./使用手册.md) (contributions to translate it are welcome).
 
-## 两种运维模式:ops 与 aiops
+## The two ops modes: ops and aiops
 
-左终端右对话是基础盘;真正的杀手锏是两种「AI 直驱终端」模式——模型不再只是"看"终端,而是亲手在上面干活,执行权分层交回你手上。
+The split view is the base; the killer feature is the two "model drives the terminal" modes — the model stops merely *watching* the terminal and works on it directly, with execution authority handed back to you in layers.
 
-### ops 模式:AI 放命令,回车即人审
+### ops mode: the model places commands, your Enter is the review
 
-`/mode ops` 进入(需至少一个在线 SSH 终端)。循环:模型把一条命令直接打进指定终端的**输入行**——**绝不代按回车**;你看过命令、亲自按回车,它才真正执行;输出自动读回给模型,模型分析后放下一条,逐台链式直到完成。每一步的执行权都在你手上,回车就是人审。多终端在线时逐台推进,同机多开自动分组防重复;配套 `ops_facts` 主机画像、`ops_broadcast` 多机群发对比、盯日志 follow 读取与排障技能(runbook)准入。
+Enter with `/mode ops` (needs at least one live SSH terminal). The loop: the model types a command into a terminal's **input line — it never presses Enter for you**; you read it, press Enter yourself, and only then it runs; the output is read back to the model automatically, which analyzes it and places the next command, host by host until the task is done. Every step's execution authority stays with you — your Enter is the human review. Includes `ops_facts` host profiling, `ops_broadcast` multi-host fan-out comparison, log-follow reading, and runbook skill admission.
 
-### aiops 模式:排查免回车,写入人审
+### aiops mode: probes without Enter, writes with review
 
-`/mode aiops` 进入,ops 的排查加速变体——**纯排查命令连同回车自动执行,任何写入/变更仍逐条等你回车**。适合「让模型自己把问题查清楚,人只把关修复动作」:排查几十条只读命令连续推进不等你,真正危险的写入一步都不会少审。
+Enter with `/mode aiops`, the accelerated variant — **pure read-only probe commands execute automatically with Enter included, while any write/change still waits for your Enter one by one**. For "let the model find out what's wrong by itself; I only gate the repairs": dozens of read-only probes run continuously without waiting for you, and the genuinely dangerous writes never skip review.
 
 | | ops | aiops |
 | --- | --- | --- |
-| 排查/检查命令 | 放输入行,等你回车 | **自动执行**,连续推进直到给结论 |
-| 写入/变更命令 | 放输入行,等你回车 | 相同:一条一条放,你看一条、回车一条 |
-| 节奏 | 一步一回车 | 先排查(免回车)→ 结论 → 再修复(逐条人审) |
+| Probe/inspection commands | Placed in the input line, wait for your Enter | **Auto-execute**, run continuously until a conclusion |
+| Write/change commands | Placed in the input line, wait for your Enter | Same: placed one by one, you review each, press Enter each |
+| Rhythm | One Enter per step | Probe (no Enter) → conclusion → repair (per-action review) |
 
-免回车按「默认放行、写入转人审」判定:管道与 `&&`/`;` 链逐段判定;未知诊断工具(`tcpdump`/`strace`/`nmap`/`ethtool`…)直接放行;写动词黑名单(`rm`/`chmod`/`kill`/`reboot`/`apt`/`kubectl apply`…)、内容静态判不了的(`python3 -c`/`sh -c`/`mysql -e`…)与写重定向/heredoc 一律转人审;`nohup rm`、`xargs rm`、`docker exec` 内层负载递归过同一套判定。
+Auto-execution uses "allow by default, route writes to review": pipes and `&&`/`;` chains are classified segment-wise; unknown diagnostic tools (`tcpdump`/`strace`/`nmap`/`ethtool`…) are allowed; write-verb blacklist (`rm`/`chmod`/`kill`/`reboot`/`apt`/`kubectl apply`…), anything not statically decidable (`python3 -c`/`sh -c`/`mysql -e`…), and write redirects/heredocs always go to human review; `nohup rm`, `xargs rm`, and `docker exec` inner payloads recurse through the same classifier.
 
-两种模式都会话级粘性、刷新自动恢复等待状态;完整规则见[使用手册 · 09 远程服务器](./docs/manual/09-远程服务器-SSH.md)。
+Both modes are sticky per session and restore their waiting state on refresh; full rules in the manual (Chinese): [Manual · 09 Remote servers](./docs/manual/09-远程服务器-SSH.md).
 
-## 快速开始
+## How it differs from neighbors
 
-### 方式一:源码直跑(最快体验)
+| | Termius / Netcatty (SSH clients) | Claude Code etc. (general AI assistants) | ForFreedom Assistant |
+| --- | --- | --- | --- |
+| Real SSH terminal | Yes | No | Yes (PTY; vim/top fullscreen apps work) |
+| AI drives the terminal | No — you type | Nothing to drive | **ops / aiops two-level driving modes** |
+| Human-review granularity | n/a | Command/file-level approval | **Enter-level: the model places the command, the Enter key is always yours**; in aiops, read-only probes skip Enter, writes are reviewed one by one |
+| Data & network | Mostly cloud-synced accounts | Cloud | **100% local data; local llama-server for full offline use — sensitive data never leaves the intranet** |
+| Built for | Connecting to servers | Writing code | **Daily ops: troubleshooting, inspections, multi-host diffing, log watching** |
+
+## Quick start
+
+### Option 1: download the prebuilt app (fastest)
+
+1. Grab the latest `ForFreedomAssistant-*.zip` (Apple Silicon) from [Releases](https://github.com/lrange2001/OpsAssistant/releases/latest);
+2. Unzip and drag `ForFreedomAssistant.app` into Applications;
+3. First launch: right-click the app → Open (the app is unsigned, a plain double-click gets blocked by Gatekeeper); afterwards it opens normally.
+
+The app is self-contained (`server.py`, backend, and frontend are all bundled) — no Python dependencies to install. Model setup below.
+
+### Option 2: run from source
 
 ```zsh
-git clone <本仓库地址> && cd llama-chat
-zsh start.sh 8090          # 等价于 python3 server.py --port 8090
+git clone https://github.com/lrange2001/OpsAssistant.git && cd OpsAssistant
+zsh start.sh 8090          # equivalent to python3 server.py --port 8090
 open http://127.0.0.1:8090
 ```
 
-> 注意:不设 `FF_DATA_DIR` 时数据目录缺省 `~/ForFreedom/assisdata`(持久不随重启丢失;位置记录在 `~/.assistant_config`,设置页可改并整体迁移,但请勿选 `/tmp` 等易失位置);想隔离试用请 `FF_DATA_DIR=/tmp/ff-demo zsh start.sh 8090`。
+> Note: without `FF_DATA_DIR`, the data directory defaults to `~/ForFreedom/assisdata` (persistent across reboots; the location is recorded in `~/.assistant_config`, changeable in Settings with full migration — avoid volatile spots like `/tmp`). For a sandboxed trial: `FF_DATA_DIR=/tmp/ff-demo zsh start.sh 8090`.
 
-### 方式二:编译成 Mac 应用(.app)
+### Option 3: build the Mac app yourself (.app)
 
-1. 装 Xcode 命令行工具(只需一次):
+1. Install Xcode Command Line Tools (once):
 
    ```zsh
    xcode-select --install
    ```
 
-2. 构建(Swift 壳编译 + 组装,server.py、backend/ 包、index.html 与 static/ 全部内嵌进 .app,产物自包含):
+2. Build (Swift shell compile + assembly; `server.py`, the `backend/` package, `index.html`, and `static/` are all embedded — the output is self-contained):
 
    ```zsh
    zsh mac-app/build.sh
    ```
 
-3. 装到应用目录并启动:
+3. Install and launch:
 
    ```zsh
    cp -R mac-app/ForFreedomAssistant.app ~/Applications/
    open ~/Applications/ForFreedomAssistant.app
    ```
 
-应用监听 `127.0.0.1:8090`,双击即用,不再依赖仓库目录。
+The app listens on `127.0.0.1:8090`, launches by double-click, and no longer depends on the repo directory.
 
-已装过旧版时的一键更新(语法检查 + 重建 + 停旧装新 + 重启,注意会断开应用内活跃的 SSH 终端):
+One-shot update when a previous version is installed (syntax check + rebuild + swap + relaunch; note it disconnects live SSH terminals in the app):
 
 ```zsh
 zsh mac-app/update.sh
 ```
 
-### 环境要求(Mac 专用)
+### Requirements (Mac only)
 
-| 项 | 要求 |
+| Item | Requirement |
 | --- | --- |
-| 系统 | macOS,Apple Silicon(M1/M2/M3/M4) |
-| Python | 3.9+,仅标准库(系统自带;全新 Mac 首次运行 `python3` 会引导装 Command Line Tools) |
-| 模型 | 任一 Anthropic 协议兼容端点:云端供应商或本地 llama-server(见下) |
-| 构建 .app | Xcode Command Line Tools(提供 swiftc) |
+| OS | macOS, Apple Silicon (M1/M2/M3/M4) |
+| Python | 3.9+, standard library only (preinstalled; a fresh Mac's first `python3` run guides you to install Command Line Tools) |
+| Model | Any Anthropic-protocol-compatible endpoint: a cloud provider or a local llama-server (below) |
+| Building the .app | Xcode Command Line Tools (provides swiftc) |
 
-界面英文、设置面板中文;模型输出全程无 emoji(服务端三层过滤);纯黑主题默认,可切浅色。
+UI is English, the settings panel is Chinese; model output is emoji-free (server-side triple filtering); pure-black theme by default, light theme available.
 
-## 配置模型(必做,三选一)
+## Model setup (required, pick one)
 
-应用本身**不含任何模型配置和 API key**——模型唯一来源是 ccswitch:服务端每次请求重读 `~/.claude/settings.json` 里的环境变量。换模型只动这个文件(或用 cc-switch 图形工具管理),应用顶栏徽章 2 秒内自动跟随,不用重启。
+The app itself **ships with no model configuration and no API key** — the single source of models is ccswitch: the server re-reads environment variables from `~/.claude/settings.json` on every request. Switching models means touching only that file (or managing it with the cc-switch GUI); the top-bar badge follows within 2 seconds, no restart.
 
-### A. 云端供应商(推荐起步)
+### A. Cloud provider (recommended start)
 
-用 [cc-switch](https://github.com/cc-switch/cc-switch) 配置任意 Anthropic 协议兼容的供应商;或直接手写 `~/.claude/settings.json`:
+Use [cc-switch](https://github.com/cc-switch/cc-switch) to configure any Anthropic-protocol-compatible provider; or hand-write `~/.claude/settings.json`:
 
 ```json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "你的 API key",
+    "ANTHROPIC_AUTH_TOKEN": "your API key",
     "ANTHROPIC_MODEL": "glm-5.1"
   }
 }
 ```
 
-智谱 GLM、Kimi、DeepSeek 等 Anthropic 兼容端点都可以;顶栏 ctx 徽章按模型名自动识别上下文窗口。
+Any Anthropic-compatible endpoint works (GLM, Kimi, DeepSeek, …); the top-bar ctx badge auto-detects the context window by model name.
 
-### B. 本地模型(内网/离线)
+### B. Local model (intranet / offline)
 
-完全离线可用,数据不出内网。以 Qwen3-Coder-30B-A3B 为例:
+Fully offline — data never leaves your intranet. Example with Qwen3-Coder-30B-A3B:
 
-1. **安装 llama.cpp**:
+1. **Install llama.cpp**:
 
    ```zsh
    brew install llama.cpp
    ```
 
-   (或从 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) 下载 macOS arm64 二进制)
+   (or grab a macOS arm64 binary from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases))
 
-2. **下载 GGUF 模型**(国内网络加 HF 镜像前缀):
+2. **Download a GGUF model** (add an HF mirror prefix on restricted networks):
 
    ```zsh
    pip3 install -U "huggingface_hub[cli]"
@@ -155,9 +175,9 @@ zsh mac-app/update.sh
      --include "*Q3_K_XL*.gguf" --local-dir ~/models
    ```
 
-   > `hf download` 中断后不跨进程续传;大文件断了可用镜像的直链 `curl -L -C - -o <文件> <url>` 续传。显存参考:30B-A3B 的 Q3_K_XL 约 13.8GB,16GB 内存的 Mac 建议改用 14B 以下量化。
+   > `hf download` cannot resume across processes; for big files interrupted mid-way, resume with `curl -L -C - -o <file> <url>` against the mirror's direct link. VRAM note: Q3_K_XL of 30B-A3B is ~13.8GB; on a 16GB Mac prefer a quant under 14B.
 
-3. **启动 llama-server**(24GB 内存参考配置:单槽 64k 上下文,KV 缓存 q8_0):
+3. **Start llama-server** (reference for 24GB RAM: single slot, 64k context, q8_0 KV cache):
 
    ```zsh
    llama-server -m ~/models/Qwen3-Coder-30B-A3B-Instruct-UD-Q3_K_XL.gguf \
@@ -166,7 +186,7 @@ zsh mac-app/update.sh
      --host 127.0.0.1 --port 8080
    ```
 
-4. **ccswitch 指向本地**(llama-server 原生提供 Anthropic 协议端点):
+4. **Point ccswitch at it** (llama-server natively speaks the Anthropic protocol):
 
    ```json
    {
@@ -178,84 +198,84 @@ zsh mac-app/update.sh
    }
    ```
 
-   应用的 ctx 徽章会自动探测 llama-server 的真实上下文长度(按 `-c` 参数),改了启动参数徽章自动跟随。
+   The ctx badge probes llama-server's real context length (from `-c`); change the launch flags and the badge follows.
 
-### C. 内网自建网关
+### C. Self-hosted intranet gateway
 
-任何 Anthropic 协议兼容的内网网关(LiteLLM、one-api 等)都行,配置方式同 A。
+Any Anthropic-protocol-compatible intranet gateway (LiteLLM, one-api, …) works; configure as in A.
 
-## 界面一览
+## Interface
 
-| 设置 · 生成参数 | 欢迎页 |
+| Settings · generation params | Welcome |
 | :---: | :---: |
-| ![设置抽屉](docs/screenshots/settings-dark.png) | ![欢迎页](docs/screenshots/welcome-dark.png) |
+| ![Settings drawer](docs/screenshots/settings-dark.png) | ![Welcome](docs/screenshots/welcome-dark.png) |
 
 <div align="center">
 
-![浅色主题](docs/screenshots/chat-light.png)
+![Light theme](docs/screenshots/chat-light.png)
 
-*浅色主题*
+*Light theme*
 
 </div>
 
-## 作者实测环境
+## Author's daily-driver setup
 
-| 项 | 配置 |
+| Item | Configuration |
 | --- | --- |
-| 机型 | MacBook Air(M2, 2022, 24GB) |
-| 云端 | GLM(glm-5.1 @ open.bigmodel.cn,Anthropic 兼容端点),131k 上下文,日常主力 |
-| 本地 | Qwen3-Coder-30B-A3B-Instruct Q3_K_XL(13.8GB,llama-server,`-c 65536 --parallel 1` + q8_0 KV),实测约 26 tok/s |
+| Machine | MacBook Air (M2, 2022, 24GB) |
+| Cloud | GLM (glm-5.1 @ open.bigmodel.cn, Anthropic-compatible endpoint), 131k context, daily driver |
+| Local | Qwen3-Coder-30B-A3B-Instruct Q3_K_XL (13.8GB, llama-server, `-c 65536 --parallel 1` + q8_0 KV), ~26 tok/s measured |
 
-云端跑长任务、本地跑敏感数据,ccswitch 一切即换。
+Cloud for long tasks, local for sensitive data — ccswitch switches in one move.
 
-## 安全与隐私
+## Security & privacy
 
-- 服务只监听 `127.0.0.1`,不对外暴露端口
-- API key 只存在本机 `~/.claude/settings.json`,**永不进入前端页面**(前端只读展示当前模型名)
-- 聊天记录只存本机浏览器 localStorage;用量统计只存本机数据目录
-- SSH 密码是可选项:填了明文存在本机数据目录 `config.json`(文件权限自动收紧 600),应用一切输出不带出密码
-- 本仓库不含任何密钥、聊天记录与真实主机信息
+- The server listens on `127.0.0.1` only; no port is exposed
+- API keys live only in `~/.claude/settings.json` and **never reach the frontend** (the UI shows only the current model name)
+- Chat history stays in the browser's localStorage; usage stats stay in the local data directory
+- SSH passwords are optional: if provided, they're stored plaintext in the local data directory's `config.json` (permissions tightened to 600), and never leave the machine through app output
+- This repository contains no keys, chat logs, or real host information
 
-## 目录结构
+## Repository layout
 
 ```
-llama-chat/
-├── server.py            # 薄壳入口(from backend.main import main)
-├── backend/             # 后端包(24 个模块:datadir/config/tools/ssh/ops/httpapi 等)
-├── index.html           # 前端壳:结构 + 有序传统 script
-├── static/              # 前端资源(js/、css/、vendored Vue,无构建步骤)
-├── mac-app/             # Swift 壳与打包:build.sh / test.sh / update.sh
-├── tests/               # Playwright 套件(八个)
-├── tools/               # 辅助脚本(前端拆分验收、README 截图摆拍)
-├── docs/                # 专项设计记录与截图
-├── 使用手册.md           # 完整用户手册
-└── start.sh             # 源码直启脚本
+OpsAssistant/
+├── server.py            # thin shell entry (from backend.main import main)
+├── backend/             # backend package (24 modules: datadir/config/tools/ssh/ops/httpapi, …)
+├── index.html           # frontend shell: structure + ordered classic scripts
+├── static/              # frontend assets (js/, css/, vendored Vue; no build step)
+├── mac-app/             # Swift shell & packaging: build.sh / test.sh / update.sh
+├── tests/               # Playwright suites (eight)
+├── tools/               # helper scripts (split verification, README screenshots)
+├── docs/                # design notes & screenshots
+├── 使用手册.md           # full user manual (Chinese)
+└── start.sh             # run-from-source script
 ```
 
-## 开发
+## Development
 
-测试(依赖 playwright-core 与真实 Chrome,依赖装法见 `tests/` 内说明;8091 为开发实例):
+Tests (need playwright-core and a real Chrome; see notes in `tests/`; 8091 is the dev instance):
 
 ```zsh
-FF_DATA_DIR=/tmp/ff-dev zsh start.sh 8091     # 另一个终端:
+FF_DATA_DIR=/tmp/ff-dev zsh start.sh 8091     # in another terminal:
 node tests/deep-test.mjs http://127.0.0.1:8091
-zsh mac-app/test.sh                           # 七步冒烟(第 7 步走真实模型,需 ccswitch 可用)
+zsh mac-app/test.sh                           # seven-step smoke (step 7 hits a real model, needs ccswitch)
 ```
 
-| 套件 | 覆盖 | 基线 |
+| Suite | Coverage | Baseline |
 | --- | --- | --- |
-| ssh-test | SSH 服务端 + 页面全交互(含终端引用、选区与 Cmd+C) | 168 |
-| deep-test | 深度 UI 全功能 | 98 |
-| longtext-test | 长文本折叠、行区间、查找展开 | 42 |
-| parallel-test | 多会话并行生成 | 30 |
-| term-render | 终端 vt100 渲染 | 36 |
-| ssh2-srv / ssh2-ui | 分组与密钥(服务端/UI) | 37 / 26 |
-| ops-test | ops 模式:UI 状态机 + ops.py 服务端直测(含 follow/群发/画像解析) | 67 |
+| ssh-test | SSH server + full page interaction (terminal quoting, selection, Cmd+C) | 168 |
+| deep-test | deep UI, all features | 99 |
+| longtext-test | long-text folding, line ranges, find-and-expand | 42 |
+| parallel-test | multi-session parallel generation | 30 |
+| term-render | terminal vt100 rendering | 36 |
+| ssh2-srv / ssh2-ui | groups & keys (server/UI) | 37 / 26 |
+| ops-test | ops mode: UI state machine + direct ops.py server tests (follow/broadcast/facts parsing) | 110 |
 
-README 截图为 `tools/screenshot.mjs` 对开发实例的摆拍(mock 模型与 SSH 数据流,不含真实数据)。
+README screenshots are staged by `tools/screenshot.mjs` against a dev instance (mock model and SSH data streams; no real data).
 
-## 许可
+## License
 
 [MIT](./LICENSE)
 
-致谢:[ZCode](https://github.com/zai-org/ZCode)(交互与功能对标)、[llama.cpp](https://github.com/ggml-org/llama.cpp)(本地推理)、[Vue.js](https://vuejs.org)(vendored,用于连接设置页)
+Acknowledgments: [ZCode](https://github.com/zai-org/ZCode) (interaction & feature benchmark), [llama.cpp](https://github.com/ggml-org/llama.cpp) (local inference), [Vue.js](https://vuejs.org) (vendored, powers the connection settings page)
