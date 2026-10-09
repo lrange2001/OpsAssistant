@@ -40,5 +40,9 @@ python3 -m compileall -q "$APP/Contents/Resources/app/backend"
 cp -R ../static "$APP/Contents/Resources/app/static"
 touch "$APP"
 
+# 组装后 ad-hoc 重签:swiftc 只签了可执行文件,塞进 Resources 后旧签名校验不过,
+# 未公证应用经 Gatekeeper 会直接报「已损坏」(而非「无法验证开发者」),重签后至少能走「仍要打开」
+codesign --force --deep -s - "$APP"
+
 echo "构建完成: $(pwd)/$APP"
 echo "安装到 ~/Applications:cp -R '$APP' ~/Applications/ && touch ~/Applications/'$APP'"

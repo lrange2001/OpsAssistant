@@ -81,7 +81,13 @@ ForFreedom Assistant 是跑在 Mac 上的**工具代理型 AI 助手**,面向内
 
 1. 到 [Releases](https://github.com/lrange2001/OpsAssistant/releases/latest) 下载最新的 `ForFreedomAssistant-*.zip`(Apple Silicon);
 2. 解压,把 `ForFreedomAssistant.app` 拖进「应用程序」;
-3. 首次打开:右键点 App →「打开」(应用未签名,直接双击会被 Gatekeeper 拦),之后正常双击即可。
+3. 清一次下载隔离属性(未签名应用不清会被 Gatekeeper 直接报「已损坏」):
+
+   ```zsh
+   xattr -dr com.apple.quarantine /Applications/ForFreedomAssistant.app
+   ```
+
+   也可以:先双击一次被拦,再到 系统设置 → 隐私与安全性 → 仍要打开;之后正常双击。
 
 > 应用自包含(server.py、backend、前端全部内嵌),不需要装 Python 依赖;模型配置见下文[配置模型](#配置模型必做三选一)。
 

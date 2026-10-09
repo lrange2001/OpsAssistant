@@ -81,7 +81,13 @@ Both modes are sticky per session and restore their waiting state on refresh; fu
 
 1. Grab the latest `ForFreedomAssistant-*.zip` (Apple Silicon) from [Releases](https://github.com/lrange2001/OpsAssistant/releases/latest);
 2. Unzip and drag `ForFreedomAssistant.app` into Applications;
-3. First launch: right-click the app → Open (the app is unsigned, a plain double-click gets blocked by Gatekeeper); afterwards it opens normally.
+3. Clear the download quarantine once (unsigned build — without this, macOS reports the app as "damaged"):
+
+   ```zsh
+   xattr -dr com.apple.quarantine /Applications/ForFreedomAssistant.app
+   ```
+
+   Alternatively: double-click once (it gets blocked), then System Settings → Privacy & Security → Open Anyway. Afterwards it opens normally.
 
 The app is self-contained (`server.py`, backend, and frontend are all bundled) — no Python dependencies to install. Model setup below.
 
